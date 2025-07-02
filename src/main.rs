@@ -1,81 +1,42 @@
-use std::io::{Read, Write, Result};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-/// Handles one client connection:
-/// - Reads up to 512 bytes at a time into `buf`.
-/// - Buffers across reads in `pending`.
-/// - Whenever it sees a full line ending in `\n`, it checks:
-///     • If the line’s content (minus any trailing `\r`) is exactly `"PING"`,
-///       it writes back `+PONG\r\n`.
-///     • Otherwise, it ignores that line (this skips RESP framing or any
-///       other noise).
-/// - Leaves any incomplete line in `pending` for the next read.
-/// - Loops until the client closes the connection.
-fn handle_client(mut stream: TcpStream) -> Result<()> {
-    let mut buf = [0u8; 512];   // scratch space for each read
-    let mut pending = Vec::new(); // accumulated bytes between reads
+/// Handle a single client:
+/// - Read line by line (buffered for you).
+/// - Trim trailing CR/LF and if the content is exactly "PING",
+///   write back "+PONG\r\n".
+/// - Loop until EOF.
+fn handle_client(stream: TcpStream) -> io::Result<()> {
+    // Clone the stream so we can both read lines and write replies
+    let reader = BufReader::new(stream.try_clone()?);
+    let mut writer = stream;
 
-    loop {
-        // 1) Read from the socket
-        let n = stream.read(&mut buf)?;
-        if n == 0 {
-            // Client closed connection
-            break;
-        }
-        // 2) Append newly read bytes
-        pending.extend_from_slice(&buf[..n]);
-
-        // 3) Scan `pending` for newline-terminated lines
-        let mut processed_up_to = 0;
-        for i in 0..pending.len() {
-            if pending[i] == b'\n' {
-                // Slice out the full line, including the newline
-                let mut line = &pending[processed_up_to..=i];
-
-                // Strip off trailing "\r\n" or "\n"
-                if line.ends_with(&[b'\r', b'\n']) {
-                    line = &line[..line.len() - 2];
-                } else if line.ends_with(&[b'\n']) {
-                    line = &line[..line.len() - 1];
-                }
-
-                // If the client literally sent "PING", reply once
-                if line == b"PING" {
-                    stream.write_all(b"+PONG\r\n")?;
-                }
-
-                // Mark that we’ve handled through byte `i`
-                processed_up_to = i + 1;
-            }
-        }
-
-        // 4) Drop all the bytes we’ve processed, keep the rest
-        if processed_up_to > 0 {
-            pending.drain(0..processed_up_to);
+    for line in reader.lines() {
+        let line = line?;                      // strips trailing '\n'
+        if line.trim_end_matches('\r') == "PING" {
+            writer.write_all(b"+PONG\r\n")?;
         }
     }
 
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> io::Result<()> {
     let addr = "127.0.0.1:6379";
     let listener = TcpListener::bind(addr)?;
     println!("Listening on {}…", addr);
 
-    // Accept each new connection and immediately hand it off to a new thread
-    for incoming in listener.incoming() {
-        match incoming {
+    for stream in listener.incoming() {
+        match stream {
             Ok(stream) => {
-                // spawn a thread to handle this client
-                thread::spawn(move || {
-                    if let Err(e) = handle_client(stream) {
-                        eprintln!("Client error: {}", e);
+                thread::spawn(|| {
+                    if let Err(err) = handle_client(stream) {
+                        eprintln!("Client error: {}", err);
                     }
                 });
             }
-            Err(e) => eprintln!("Accept error: {}", e),
+            Err(err) => eprintln!("Accept error: {}", err),
         }
     }
 
