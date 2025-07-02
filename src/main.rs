@@ -1,35 +1,59 @@
+// -----------------------------------------------------------------------------
+// A minimal Redis clone implementing a subset of the RESP (REdis Serialization Protocol)
+//  
+// RESP supports five data types:
+//  
+// 1) Simple Strings: start with '+' and end with "\r\n".
+//    Used for success replies like "+OK\r\n" or "+PONG\r\n".
+//  
+// 2) Errors: start with '-' and end with "\r\n".
+//    Used for errors, e.g., "-ERR unknown command\r\n".
+//  
+// 3) Integers: start with ':' and end with "\r\n".
+//    Used for integer replies (not used in this example).
+//  
+// 4) Bulk Strings: start with '$', then the byte length, then "\r\n",
+//    then the data, then "\r\n". Example: "$3\r\nfoo\r\n".
+//    A special length of -1 ("$-1\r\n") represents a Null Bulk String.
+//  
+// 5) Arrays: start with '*', then the number of elements, then "\r\n",
+//    followed by that many Bulk Strings. Example: "*2\r\n$4\r\nPING\r\n$4\r\nECHO\r\n".
+//  
+// In this server, we parse Arrays of Bulk Strings as incoming commands,
+// then respond with Simple Strings or Bulk Strings as appropriate.
+// -----------------------------------------------------------------------------
+
+
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Read exactly one RESP Array from `reader` and return its elements as Rust `String`s.
 /// Returns `Ok(None)` on EOF (client closed connection).
 fn read_resp_array<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<String>>> {
     // 1) Read the array header line, e.g. "*2\r\n"
-    //    "*" indicates an Array, "2" means two elements follow.
     let mut header = String::new();
     let bytes = reader.read_line(&mut header)?;
     if bytes == 0 {
-        // EOF
         return Ok(None);
     }
     let header = header.trim_end_matches("\r\n");
     if !header.starts_with('*') {
-        // Not a valid Array header: skip or ignore.
+        // Not an Array; ignore
         return Ok(Some(Vec::new()));
     }
 
-    // Parse the number of elements
+    // Parse number of elements
     let count: usize = header[1..]
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid array header"))?;
 
     let mut args = Vec::with_capacity(count);
-
-    // 2) For each element, read a Bulk String:
+    // 2) Read each Bulk String argument
     for _ in 0..count {
-        // 2a) Read bulk-string header, e.g. "$4\r\n"
-        //     "$" indicates Bulk String, "4" is the byte-length of the payload.
+        // Bulk header: "$<len>\r\n"
         let mut bulk_header = String::new();
         reader.read_line(&mut bulk_header)?;
         let bulk_header = bulk_header.trim_end_matches("\r\n");
@@ -43,11 +67,11 @@ fn read_resp_array<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<String>>
             .parse()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid bulk length"))?;
 
-        // 2b) Read exactly `len` bytes of data + 2 bytes for "\r\n"
+        // Read `len` bytes of data + CRLF
         let mut buf = vec![0; len + 2];
         reader.read_exact(&mut buf)?;
 
-        // Strip the trailing "\r\n" and convert to UTF-8
+        // Strip trailing "\r\n" and convert
         let arg = String::from_utf8(buf[..len].to_vec())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
         args.push(arg);
@@ -56,52 +80,74 @@ fn read_resp_array<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<String>>
     Ok(Some(args))
 }
 
-/// Handle a single client connection:
-/// - Repeatedly parse RESP commands with `read_resp_array`
-/// - Dispatch on the command name (case-insensitive)
-/// - Write back RESP-formatted replies
-fn handle_client(stream: TcpStream) -> io::Result<()> {
+/// Handle one client connection:
+/// - Loop parsing RESP commands
+/// - Dispatch PING, ECHO, SET, GET
+/// - Reply with proper RESP types
+fn handle_client(
+    stream: TcpStream,
+    store: Arc<Mutex<HashMap<String, String>>>,
+) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
-    // Loop until client disconnects
     while let Some(args) = read_resp_array(&mut reader)? {
         if args.is_empty() {
-            // Malformed or unsupported frame—ignore and continue
-            continue;
+            continue; // malformed or unrecognized frame
         }
 
-        // Redis commands are case-insensitive
+        // Commands are case-insensitive
         let cmd = args[0].to_uppercase();
         match cmd.as_str() {
             "PING" => {
-                // Simple-string reply: "+PONG\r\n"
-                // RESP Simple String: starts with '+', then message, then CRLF
+                // RESP Simple String: +PONG\r\n
                 writer.write_all(b"+PONG\r\n")?;
             }
             "ECHO" => {
-                // Bulk-string reply: first "$<len>\r\n", then data, then "\r\n"
+                // RESP Bulk String reply: $<len>\r\n<payload>\r\n
                 if args.len() == 2 {
                     let payload = &args[1];
-                    // Write bulk header with payload length
                     write!(writer, "${}\r\n", payload.len())?;
-                    // Write the payload bytes
                     writer.write_all(payload.as_bytes())?;
-                    // Terminate with CRLF
                     writer.write_all(b"\r\n")?;
                 } else {
-                    // Wrong number of arguments: RESP Error
-                    // RESP Error: starts with '-', then message, then CRLF
-                    writer.write_all(b"-ERR wrong number of arguments for 'echo' command\r\n")?;
+                    writer.write_all(b"-ERR wrong number of arguments for 'echo'\r\n")?;
+                }
+            }
+            "SET" => {
+                // SET key value -> store and reply +OK\r\n
+                if args.len() == 3 {
+                    let key = args[1].clone();
+                    let val = args[2].clone();
+                    let mut map = store.lock().unwrap();
+                    map.insert(key, val);
+                    writer.write_all(b"+OK\r\n")?;
+                } else {
+                    writer.write_all(b"-ERR wrong number of arguments for 'set'\r\n")?;
+                }
+            }
+            "GET" => {
+                // GET key -> reply Bulk String or Null Bulk String
+                if args.len() == 2 {
+                    let key = &args[1];
+                    let map = store.lock().unwrap();
+                    if let Some(val) = map.get(key) {
+                        write!(writer, "${}\r\n", val.len())?;
+                        writer.write_all(val.as_bytes())?;
+                        writer.write_all(b"\r\n")?;
+                    } else {
+                        // Null Bulk String for missing key
+                        writer.write_all(b"$-1\r\n")?;
+                    }
+                } else {
+                    writer.write_all(b"-ERR wrong number of arguments for 'get'\r\n")?;
                 }
             }
             _ => {
-                // Unknown command: RESP Error
                 writer.write_all(b"-ERR unknown command\r\n")?;
             }
         }
 
-        // Flush to ensure the reply is sent immediately
         writer.flush()?;
     }
 
@@ -113,12 +159,15 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     println!("Listening on {}…", addr);
 
-    // Accept connections in a loop, spawning a new thread per client
+    // Shared in-memory store for all clients
+    let store = Arc::new(Mutex::new(HashMap::new()));
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                thread::spawn(|| {
-                    if let Err(err) = handle_client(stream) {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    if let Err(err) = handle_client(stream, store) {
                         eprintln!("Client error: {}", err);
                     }
                 });
