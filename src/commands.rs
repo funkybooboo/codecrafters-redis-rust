@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Write},
-    sync::{Arc, Mutex},
+    sync::{Mutex},
     time::Instant,
 };
 use std::time::Duration;
