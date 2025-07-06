@@ -2,13 +2,12 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     sync::{Mutex},
-    time::Instant,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use crate::config::ServerConfig;
 use crate::resp::write_bulk_string;
 
-type Store = Mutex<HashMap<String, (String, Option<Instant>)>>;
+pub(crate) type Store = Mutex<HashMap<String, (String, Option<SystemTime>)>>;
 
 /// PING → +PONG
 pub fn cmd_ping<W: Write>(out: &mut W) -> io::Result<()> {
@@ -25,18 +24,25 @@ pub fn cmd_echo<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
 }
 
 /// SET key value [PX ms]
-pub fn cmd_set<W: Write>(out: &mut W, args: &[String], store: &Store) -> io::Result<()> {
+pub fn cmd_set<W: Write>(
+    out: &mut W,
+    args: &[String],
+    store: &Store,
+) -> io::Result<()> {
     match args.len() {
         3 => {
-            let mut map = store.lock().unwrap();
-            map.insert(args[1].clone(), (args[2].clone(), None));
+            let mut m = store.lock().unwrap();
+            m.insert(args[1].clone(), (args[2].clone(), None));
             out.write_all(b"+OK\r\n")
         }
         5 if args[3].eq_ignore_ascii_case("PX") => {
             if let Ok(ms) = args[4].parse::<u64>() {
-                let expiry = Instant::now() + Duration::from_millis(ms);
-                let mut map = store.lock().unwrap();
-                map.insert(args[1].clone(), (args[2].clone(), Some(expiry)));
+                // record a SystemTime expiry
+                let expiry = SystemTime::now()
+                    .checked_add(Duration::from_millis(ms))
+                    .unwrap();
+                let mut m = store.lock().unwrap();
+                m.insert(args[1].clone(), (args[2].clone(), Some(expiry)));
                 out.write_all(b"+OK\r\n")
             } else {
                 out.write_all(b"-ERR invalid PX value\r\n")
@@ -46,16 +52,23 @@ pub fn cmd_set<W: Write>(out: &mut W, args: &[String], store: &Store) -> io::Res
     }
 }
 
-/// GET key
-pub fn cmd_get<W: Write>(out: &mut W, args: &[String], store: &Store) -> io::Result<()> {
+/// GET key → BulkString or NullBulk if missing/expired
+pub fn cmd_get<W: Write>(
+    out: &mut W,
+    args: &[String],
+    store: &Store,
+) -> io::Result<()> {
     if args.len() != 2 {
         return out.write_all(b"-ERR wrong number of arguments for 'get'\r\n");
     }
-    let mut map = store.lock().unwrap();
-    if let Some((val, exp_opt)) = map.get(&args[1]).cloned() {
-        if let Some(exp) = exp_opt {
-            if Instant::now() >= exp {
-                map.remove(&args[1]);
+    let key = &args[1];
+    let mut m = store.lock().unwrap();
+
+    if let Some((val, opt_expiry)) = m.get(key).cloned() {
+        // if there's an expiry, and it's passed, delete and return NULL
+        if let Some(expiry) = opt_expiry {
+            if SystemTime::now() >= expiry {
+                m.remove(key);
                 return out.write_all(b"$-1\r\n");
             }
         }
