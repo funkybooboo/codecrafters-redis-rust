@@ -20,8 +20,8 @@ fn main() -> std::io::Result<()> {
     let cfg = Arc::new(cfg);
 
     // 3) Serve
-    let listener = TcpListener::bind("127.0.0.1:6379")?;
-    println!("Listening on 127.0.0.1:6379…");
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", cfg.port))?;
+    println!("Listening on 127.0.0.1:{}...", cfg.port);
 
     for stream in listener.incoming() {
         let s = Arc::clone(&store);
