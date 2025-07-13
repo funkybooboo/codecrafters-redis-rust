@@ -3,8 +3,6 @@ use std::{
     io::{self, Write},
     sync::{Mutex},
 };
-use std::fmt::format;
-use std::mem::forget;
 use std::time::{Duration, SystemTime};
 use crate::config::ServerConfig;
 use crate::resp::write_bulk_string;
