@@ -3,16 +3,24 @@ mod resp;
 mod rdb;
 mod commands;
 mod server;
+mod role;
+mod handshake;
 
-use std::{net::TcpListener, sync::{Arc, Mutex}};
-
+use std::{io, net::TcpListener, sync::{Arc, Mutex}};
 use crate::config::parse_config;
+use crate::handshake::replica_handshake;
 use crate::rdb::load_rdb_snapshot;
+use crate::role::Role;
 use crate::server::handle_client;
 
-fn main() -> std::io::Result<()> {
+fn main() -> io::Result<()> {
     // 1) CLI flags
     let cfg = parse_config();
+
+    // Part 1 of replica handshake: send PING to master
+    if cfg.role == Role::Slave {
+        replica_handshake(&cfg)?;
+    }
 
     // 2) Load every (key, (value, expiry?)) from RDB
     let snapshot = load_rdb_snapshot(format!("{}/{}", cfg.dir, cfg.dbfilename))?;

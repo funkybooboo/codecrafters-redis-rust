@@ -47,6 +47,24 @@ pub(crate) fn read_resp_array<R: BufRead>(reader: &mut R) -> io::Result<Option<V
     Ok(Some(args))
 }
 
+/// Send a RESP Array of Bulk Strings:
+///   *<N>\r\n
+///   $<len1>\r\n<item1>\r\n
+///   $<len2>\r\n<item2>\r\n
+///   …
+///
+/// For example, `&["PING"]` becomes `*1\r\n$4\r\nPING\r\n`.
+pub(crate) fn write_resp_array<W: Write>(writer: &mut W, items: &[&str]) -> io::Result<()> {
+    // 1) Array header
+    write!(writer, "*{}\r\n", items.len())?;
+    // 2) Each element as a Bulk String
+    for &item in items {
+        // reuse your write_bulk_string helper
+        write_bulk_string(writer, item)?;
+    }
+    Ok(())
+}
+
 /// Send a Bulk String response: `$<len>\r\n<data>\r\n`
 pub(crate) fn write_bulk_string<W: Write>(writer: &mut W, data: &str) -> io::Result<()> {
     write!(writer, "${}\r\n", data.len())?;
