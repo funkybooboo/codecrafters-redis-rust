@@ -4,11 +4,11 @@ mod rdb;
 mod commands;
 mod server;
 mod role;
-mod handshake;
+mod handshakes;
 
 use std::{io, net::TcpListener, sync::{Arc, Mutex}};
 use crate::config::parse_config;
-use crate::handshake::replica_handshake;
+use crate::handshakes::replica_handshake;
 use crate::rdb::load_rdb_snapshot;
 use crate::role::Role;
 use crate::server::handle_client;

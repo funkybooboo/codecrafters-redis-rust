@@ -143,3 +143,14 @@ pub fn cmd_info<W: Write>(
         write_bulk_string(out, "")
     }
 }
+
+/// REPLCONF <option> <value>
+/// For now we just always reply +OK
+pub fn cmd_replconf<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
+    if args.len() == 3 {
+        // valid form: REPLCONF <opt> <val>
+        out.write_all(b"+OK\r\n")
+    } else {
+        out.write_all(b"-ERR wrong number of arguments for 'REPLCONF'\r\n")
+    }
+}

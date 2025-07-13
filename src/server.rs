@@ -6,7 +6,7 @@ use std::{
 
 use crate::config::ServerConfig;
 use crate::resp::read_resp_array;
-use crate::commands::{Store, cmd_ping, cmd_echo, cmd_set, cmd_get, cmd_config, cmd_keys, cmd_info};
+use crate::commands::{Store, cmd_ping, cmd_echo, cmd_set, cmd_get, cmd_config, cmd_keys, cmd_info, cmd_replconf};
 
 /// Handle one client: read RESP arrays, dispatch to `commands`, flush.
 pub fn handle_client(
@@ -30,6 +30,7 @@ pub fn handle_client(
             "CONFIG" => cmd_config(&mut writer, &args, &cfg),
             "KEYS"   => cmd_keys(&mut writer, &args, &store),
             "INFO"   => cmd_info(&mut writer, &args, &cfg),
+            "REPLCONF"  => cmd_replconf(&mut writer, &args),
             _        => writer.write_all(b"-ERR unknown command\r\n"),
         };
         res?;
