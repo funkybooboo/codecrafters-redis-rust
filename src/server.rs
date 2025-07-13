@@ -29,7 +29,7 @@ pub fn handle_client(
             "GET"    => cmd_get(&mut writer, &args, &store),
             "CONFIG" => cmd_config(&mut writer, &args, &cfg),
             "KEYS"   => cmd_keys(&mut writer, &args, &store),
-            "INFO"   => cmd_info(&mut writer, &args),
+            "INFO"   => cmd_info(&mut writer, &args, &cfg),
             _        => writer.write_all(b"-ERR unknown command\r\n"),
         };
         res?;

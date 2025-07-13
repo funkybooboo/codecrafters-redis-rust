@@ -3,6 +3,8 @@ use std::{
     io::{self, Write},
     sync::{Mutex},
 };
+use std::fmt::format;
+use std::mem::forget;
 use std::time::{Duration, SystemTime};
 use crate::config::ServerConfig;
 use crate::resp::write_bulk_string;
@@ -121,14 +123,16 @@ pub fn cmd_keys<W: Write>(
 }
 
 /// INFO [section]
-/// In this stage we only support "replication" -> "role:master"
-pub fn cmd_info<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
-    // Expect: INFO replication
+/// In this stage we only support "replication" -> "role:<whatever is in cfg.role>"
+pub fn cmd_info<W: Write>(
+    out: &mut W,
+    args: &[String],
+    cfg: &ServerConfig
+) -> io::Result<()> {
     if args.len() == 2 && args[1].eq_ignore_ascii_case("replication") {
-        // write_bulk_string will emit: $11\r\nrole:master\r\n
-        write_bulk_string(out, "role:master")
+        write_bulk_string(out, &format!("role:{}", cfg.role))
     } else {
-        // empty bulk‐string for unsupported sections
+        // unsupported section -> empty bulk string
         write_bulk_string(out, "")
     }
 }
