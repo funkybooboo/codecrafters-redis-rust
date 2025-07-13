@@ -121,16 +121,25 @@ pub fn cmd_keys<W: Write>(
 }
 
 /// INFO [section]
-/// In this stage we only support "replication" -> "role:<whatever is in cfg.role>"
+/// In this stage we only support the "replication" section
 pub fn cmd_info<W: Write>(
     out: &mut W,
     args: &[String],
     cfg: &ServerConfig
 ) -> io::Result<()> {
     if args.len() == 2 && args[1].eq_ignore_ascii_case("replication") {
-        write_bulk_string(out, &format!("role:{}", cfg.role))
+        // build one CRLF‐delimited string with all the fields:
+        let info = format!(
+            "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+            cfg.role,
+            cfg.master_replid,
+            cfg.master_repl_offset
+        );
+        // this single call will emit:
+        // $<len>\r\nrole:master\r\nmaster_replid:<id>\r\nmaster_repl_offset:<offset>\r\n
+        write_bulk_string(out, &info)
     } else {
-        // unsupported section -> empty bulk string
+        // unsupported section → empty bulk string
         write_bulk_string(out, "")
     }
 }

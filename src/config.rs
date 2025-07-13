@@ -9,6 +9,8 @@ pub struct ServerConfig {
     pub role: String,
     pub master_host: String,
     pub master_port: u16,
+    pub master_replid: String,
+    pub master_repl_offset: i32,
 }
 
 /// Read `--dir <path>` and `--dbfilename <name>`, etc. from CLI.
@@ -19,6 +21,8 @@ pub fn parse_config() -> ServerConfig {
     let mut role = "master".to_string();
     let mut master_host = "".to_string();
     let mut master_port= 0;
+    let master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string();
+    let master_repl_offset = 0;
     let args: Vec<_> = env::args().collect();
     let mut i = 1;
     while i + 1 < args.len() {
@@ -47,5 +51,5 @@ pub fn parse_config() -> ServerConfig {
         }
         i += 2;
     }
-    ServerConfig { dir, dbfilename, port, role, master_host, master_port }
+    ServerConfig { dir, dbfilename, port, role, master_host, master_port, master_replid, master_repl_offset }
 }
