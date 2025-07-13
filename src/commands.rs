@@ -9,12 +9,12 @@ use crate::resp::write_bulk_string;
 
 pub(crate) type Store = Mutex<HashMap<String, (String, Option<SystemTime>)>>;
 
-/// PING → +PONG
+/// PING -> +PONG
 pub fn cmd_ping<W: Write>(out: &mut W) -> io::Result<()> {
     out.write_all(b"+PONG\r\n")
 }
 
-/// ECHO <msg> → BulkString(msg)
+/// ECHO <msg> -> BulkString(msg)
 pub fn cmd_echo<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
     if args.len() == 2 {
         write_bulk_string(out, &args[1])
@@ -52,7 +52,7 @@ pub fn cmd_set<W: Write>(
     }
 }
 
-/// GET key → BulkString or NullBulk if missing/expired
+/// GET key -> BulkString or NullBulk if missing/expired
 pub fn cmd_get<W: Write>(
     out: &mut W,
     args: &[String],
@@ -118,4 +118,17 @@ pub fn cmd_keys<W: Write>(
         write_bulk_string(out, key)?;
     }
     Ok(())
+}
+
+/// INFO [section]
+/// In this stage we only support "replication" -> "role:master"
+pub fn cmd_info<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
+    // Expect: INFO replication
+    if args.len() == 2 && args[1].eq_ignore_ascii_case("replication") {
+        // write_bulk_string will emit: $11\r\nrole:master\r\n
+        write_bulk_string(out, "role:master")
+    } else {
+        // empty bulk‐string for unsupported sections
+        write_bulk_string(out, "")
+    }
 }
