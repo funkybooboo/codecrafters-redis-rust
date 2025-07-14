@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::config::ServerConfig;
@@ -7,15 +9,22 @@ use crate::resp::{
     write_simple_string, write_error, write_bulk_string, check_len,
 };
 use crate::rdb::{Store, EMPTY_RDB};
+use crate::role::Role;
 
 /// A little context bundling everything cmds might need
 pub struct Context<'a> {
     pub cfg: &'a ServerConfig,
     pub store: &'a Store,
+    pub replicas: Arc<Mutex<Vec<TcpStream>>>,
 }
 
 /// Every command has this signature
-pub type CmdFn = fn(out: &mut dyn Write, args: &[String], ctx: &Context) -> io::Result<()>;
+pub type CmdFn = fn(stream: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()>;
+
+// helper to know which commands should be fanned out
+pub fn is_write_cmd(cmd: &str) -> bool {
+    matches!(cmd, "SET" | "DEL")
+}
 
 /// Build the command registry once
 pub fn make_registry() -> HashMap<String, CmdFn> {
@@ -34,7 +43,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
 
 /// PING -> +PONG
 pub fn cmd_ping(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     _args: &[String],
     _ctx: &Context,
 ) -> io::Result<()> {
@@ -43,7 +52,7 @@ pub fn cmd_ping(
 
 /// ECHO <msg> -> BulkString(msg)
 pub fn cmd_echo(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     _ctx: &Context,
 ) -> io::Result<()> {
@@ -55,7 +64,7 @@ pub fn cmd_echo(
 
 /// SET key value [PX ms]
 pub fn cmd_set(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
@@ -85,7 +94,7 @@ pub fn cmd_set(
 
 /// GET key -> BulkString or NullBulk
 pub fn cmd_get(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
@@ -110,7 +119,7 @@ pub fn cmd_get(
 
 /// CONFIG GET <dir|dbfilename>
 pub fn cmd_config(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
@@ -136,7 +145,7 @@ pub fn cmd_config(
 
 /// KEYS "*"
 pub fn cmd_keys(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
@@ -161,7 +170,7 @@ pub fn cmd_keys(
 
 /// INFO replication
 pub fn cmd_info(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
@@ -183,7 +192,7 @@ pub fn cmd_info(
 
 /// REPLCONF <option> <value>
 pub fn cmd_replconf(
-    out: &mut dyn Write,
+    out: &mut TcpStream,
     args: &[String],
     _ctx: &Context,
 ) -> io::Result<()> {
@@ -197,21 +206,29 @@ pub fn cmd_replconf(
 ///   → +FULLRESYNC <replid> 0\r\n
 ///   → $<len>\r\n<empty RDB bytes>
 pub fn cmd_psync(
-    out: &mut dyn Write,
+    stream: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
-    if !check_len(out, args, 3, "usage: PSYNC <master_replid> <master_repl_offset>") {
+    // 1) Validate args
+    if !check_len(stream, args, 3, "usage: PSYNC <master_replid> <master_repl_offset>") {
         return Ok(());
     }
 
-    // 1) Send "+FULLRESYNC <id> 0\r\n"
-    let full = format!("FULLRESYNC {} 0", ctx.cfg.master_replid);
-    write_simple_string(out, &full)?;
+    // 2) Send "+FULLRESYNC <id> <offset>\r\n"
+    let full = format!("FULLRESYNC {} {}", ctx.cfg.master_replid, ctx.cfg.master_repl_offset);
+    write_simple_string(stream, &full)?;
 
-    // 2) Send empty RDB length + raw bytes
-    write!(out, "${}\r\n", EMPTY_RDB.len())?;
-    out.write_all(EMPTY_RDB)?;
+    // 3) Send empty RDB: length header + bytes
+    write!(stream, "${}\r\n", EMPTY_RDB.len())?;
+    stream.write_all(EMPTY_RDB)?;
+
+    // 4) If we are master, register this replica for later propagation
+    if ctx.cfg.role == Role::Master {
+        let mut reps = ctx.replicas.lock().unwrap();
+        // clone the connection so future SETs can fan out here
+        reps.push(stream.try_clone()?);
+    }
 
     Ok(())
 }

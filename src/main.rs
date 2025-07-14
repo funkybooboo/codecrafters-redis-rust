@@ -8,6 +8,7 @@ mod handshakes;
 mod utils;
 
 use std::{io, net::TcpListener, sync::{Arc, Mutex}};
+use std::net::TcpStream;
 use crate::config::parse_config;
 use crate::handshakes::replica_handshake;
 use crate::rdb::load_rdb_snapshot;
@@ -17,6 +18,8 @@ use crate::server::handle_client;
 fn main() -> io::Result<()> {
     // 1) CLI flags
     let cfg = parse_config();
+
+    let replicas: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Part 1 of replica handshake: send PING to master
     if cfg.role == Role::Slave {
@@ -33,11 +36,12 @@ fn main() -> io::Result<()> {
     println!("Listening on 127.0.0.1:{}...", cfg.port);
 
     for stream in listener.incoming() {
-        let s = Arc::clone(&store);
-        let c = Arc::clone(&cfg);
         let stream = stream?;
+        let s       = Arc::clone(&store);
+        let c       = Arc::clone(&cfg);
+        let reps    = Arc::clone(&replicas);
         std::thread::spawn(move || {
-            if let Err(e) = handle_client(stream, s, c) {
+            if let Err(e) = handle_client(stream, s, c, reps) {
                 eprintln!("Client error: {}", e);
             }
         });
