@@ -6,7 +6,7 @@ use crate::config::ServerConfig;
 use crate::resp::{
     write_simple_string, write_error, write_bulk_string, check_len,
 };
-use crate::rdb::Store;
+use crate::rdb::{Store, EMPTY_RDB};
 
 /// A little context bundling everything cmds might need
 pub struct Context<'a> {
@@ -194,8 +194,8 @@ pub fn cmd_replconf(
 }
 
 /// PSYNC <master_replid> <master_repl_offset>
-/// Always do a full resync:
-///   +FULLRESYNC <master_replid> 0\r\n
+///   → +FULLRESYNC <replid> 0\r\n
+///   → $<len>\r\n<empty RDB bytes>
 pub fn cmd_psync(
     out: &mut dyn Write,
     args: &[String],
@@ -204,7 +204,14 @@ pub fn cmd_psync(
     if !check_len(out, args, 3, "usage: PSYNC <master_replid> <master_repl_offset>") {
         return Ok(());
     }
-    // ignore the provided args[1] & args[2], always full resync:
-    let reply = format!("FULLRESYNC {} {}", ctx.cfg.master_replid, ctx.cfg.master_repl_offset);
-    write_simple_string(out, &reply)
+
+    // 1) Send "+FULLRESYNC <id> 0\r\n"
+    let full = format!("FULLRESYNC {} 0", ctx.cfg.master_replid);
+    write_simple_string(out, &full)?;
+
+    // 2) Send empty RDB length + raw bytes
+    write!(out, "${}\r\n", EMPTY_RDB.len())?;
+    out.write_all(EMPTY_RDB)?;
+
+    Ok(())
 }
