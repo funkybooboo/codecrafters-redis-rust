@@ -4,33 +4,38 @@ use crate::config::ServerConfig;
 use crate::resp::write_array;
 use crate::utils::wait_for_it;
 
-/// Part 1 & 2 of the replica handshake:
+/// Full replica handshake (parts 1–3):
+///
 /// 1) PING
-/// 2) wait_for_it -> +PONG
-/// 3) REPLCONF listening-port <port>
-/// 4) wait_for_it -> +OK
-/// 5) REPLCONF capa psync2
-/// 6) wait_for_it -> +OK
+///    -> +PONG
+/// 2) REPLCONF listening-port <our-port>
+///    -> +OK
+/// 3) REPLCONF capa psync2
+///    -> +OK
+/// 4) PSYNC ? -1
+///    -> +FULLRESYNC <replid> 0
 pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<()> {
-    // 1) connect
+    // Connect to the master
     let mut master = TcpStream::connect((&cfg.master_host[..], cfg.master_port))?;
 
-    // 2) PING
+    // 1) Send PING
     write_array(&mut master, &["PING"])?;
-    // 3) wait for +PONG
+    // Wait for +PONG
     let _ = wait_for_it(&mut master)?;
 
-    // 4) listening-port
-    write_array(
-        &mut master,
-        &["REPLCONF", "listening-port", &cfg.port.to_string()],
-    )?;
-    // 5) wait for +OK
+    // 2) Notify listening port
+    write_array(&mut master, &["REPLCONF", "listening-port", &cfg.port.to_string()])?;
+    // Wait for +OK
     let _ = wait_for_it(&mut master)?;
 
-    // 6) capa psync2
+    // 3) Send capabilities
     write_array(&mut master, &["REPLCONF", "capa", "psync2"])?;
-    // 7) wait for +OK
+    // Wait for +OK
+    let _ = wait_for_it(&mut master)?;
+
+    // 4) PSYNC initial sync
+    write_array(&mut master, &["PSYNC", "?", "-1"])?;
+    // Wait for +FULLRESYNC …\r\n (we'll parse it later)
     let _ = wait_for_it(&mut master)?;
 
     Ok(())

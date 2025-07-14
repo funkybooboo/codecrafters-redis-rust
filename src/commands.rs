@@ -28,6 +28,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("KEYS".into(), cmd_keys as CmdFn);
     m.insert("INFO".into(), cmd_info as CmdFn);
     m.insert("REPLCONF".into(), cmd_replconf as CmdFn);
+    m.insert("PSYNC".into(), cmd_psync as CmdFn);
     m
 }
 
@@ -190,4 +191,20 @@ pub fn cmd_replconf(
         return Ok(());
     }
     write_simple_string(out, "OK")
+}
+
+/// PSYNC <master_replid> <master_repl_offset>
+/// Always do a full resync:
+///   +FULLRESYNC <master_replid> 0\r\n
+pub fn cmd_psync(
+    out: &mut dyn Write,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 3, "usage: PSYNC <master_replid> <master_repl_offset>") {
+        return Ok(());
+    }
+    // ignore the provided args[1] & args[2], always full resync:
+    let reply = format!("FULLRESYNC {} {}", ctx.cfg.master_replid, ctx.cfg.master_repl_offset);
+    write_simple_string(out, &reply)
 }
