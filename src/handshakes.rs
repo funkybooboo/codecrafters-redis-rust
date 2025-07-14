@@ -1,49 +1,37 @@
 use std::io;
-use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use crate::config::ServerConfig;
-use crate::resp::write_resp_array;
+use crate::resp::write_array;
+use crate::utils::wait_for_it;
 
 /// Part 1 & 2 of the replica handshake:
-///  1) PING
-///  2) read +PONG
-///  3) REPLCONF listening-port <our-port>
-///  4) read +OK
-///  5) REPLCONF capa psync2
-///  6) read +OK
+/// 1) PING
+/// 2) wait_for_it -> +PONG
+/// 3) REPLCONF listening-port <port>
+/// 4) wait_for_it -> +OK
+/// 5) REPLCONF capa psync2
+/// 6) wait_for_it -> +OK
 pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<()> {
-    // connect to the master
-    let mut stream = TcpStream::connect((cfg.master_host.as_str(), cfg.master_port))?;
+    // 1) connect
+    let mut master = TcpStream::connect((&cfg.master_host[..], cfg.master_port))?;
 
-    // 1) send PING
-    write_resp_array(&mut stream, &["PING"])?;
-    // 2) wait for +PONG\r\n
-    {
-        let mut reader = BufReader::new(&mut stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;  // should be "+PONG\r\n"
-    }
+    // 2) PING
+    write_array(&mut master, &["PING"])?;
+    // 3) wait for +PONG
+    let _ = wait_for_it(&mut master)?;
 
-    // 3) notify listening port
-    write_resp_array(
-        &mut stream,
+    // 4) listening-port
+    write_array(
+        &mut master,
         &["REPLCONF", "listening-port", &cfg.port.to_string()],
     )?;
-    // 4) wait for +OK\r\n
-    {
-        let mut reader = BufReader::new(&mut stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-    }
+    // 5) wait for +OK
+    let _ = wait_for_it(&mut master)?;
 
-    // 5) advertise psync2 capability
-    write_resp_array(&mut stream, &["REPLCONF", "capa", "psync2"])?;
-    // 6) wait for +OK\r\n
-    {
-        let mut reader = BufReader::new(&mut stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-    }
+    // 6) capa psync2
+    write_array(&mut master, &["REPLCONF", "capa", "psync2"])?;
+    // 7) wait for +OK
+    let _ = wait_for_it(&mut master)?;
 
     Ok(())
 }

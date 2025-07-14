@@ -5,35 +5,36 @@ use std::{
 };
 
 use crate::config::ServerConfig;
-use crate::resp::read_resp_array;
-use crate::commands::{Store, cmd_ping, cmd_echo, cmd_set, cmd_get, cmd_config, cmd_keys, cmd_info, cmd_replconf};
+use crate::resp::{read_array, write_error};
+use crate::commands::{make_registry, Context};
+use crate::rdb::Store;
 
-/// Handle one client: read RESP arrays, dispatch to `commands`, flush.
 pub fn handle_client(
     stream: TcpStream,
-    store: Arc<Store>,         // now uses the same Store alias as commands.rs
+    store: Arc<Store>,
     cfg: Arc<ServerConfig>,
 ) -> io::Result<()> {
     let mut reader = io::BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
-    while let Some(args) = read_resp_array(&mut reader)? {
+    // Build the map of command names → functions
+    let registry = make_registry();
+
+    while let Some(args) = read_array(&mut reader)? {
         if args.is_empty() {
             continue;
         }
-        let cmd = args[0].to_uppercase();
-        let res = match cmd.as_str() {
-            "PING"   => cmd_ping(&mut writer),
-            "ECHO"   => cmd_echo(&mut writer, &args),
-            "SET"    => cmd_set(&mut writer, &args, &store),
-            "GET"    => cmd_get(&mut writer, &args, &store),
-            "CONFIG" => cmd_config(&mut writer, &args, &cfg),
-            "KEYS"   => cmd_keys(&mut writer, &args, &store),
-            "INFO"   => cmd_info(&mut writer, &args, &cfg),
-            "REPLCONF"  => cmd_replconf(&mut writer, &args),
-            _        => writer.write_all(b"-ERR unknown command\r\n"),
-        };
-        res?;
+        let cmd_name = args[0].to_uppercase();
+        let ctx = Context { cfg: &cfg, store: &store };
+
+        if let Some(cmd_fn) = registry.get(&cmd_name) {
+            // Call the matched command
+            cmd_fn(&mut writer, &args, &ctx)?;
+        } else {
+            // Unknown command
+            write_error(&mut writer, "unknown command")?;
+        }
+
         writer.flush()?;
     }
 

@@ -5,6 +5,7 @@ mod commands;
 mod server;
 mod role;
 mod handshakes;
+mod utils;
 
 use std::{io, net::TcpListener, sync::{Arc, Mutex}};
 use crate::config::parse_config;

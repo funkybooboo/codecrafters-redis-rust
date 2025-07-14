@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Write};
 /// Read one RESP Array of Bulk Strings.
 /// Returns `Ok(Some(vec![]))` on an empty/malformed array header,
 /// `Ok(None)` on EOF, or `Err` on other I/O errors.
-pub(crate) fn read_resp_array<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<String>>> {
+pub(crate) fn read_array<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<String>>> {
     // Read the `*<count>\r\n` line
     let mut header = String::new();
     if reader.read_line(&mut header)? == 0 {
@@ -47,27 +47,41 @@ pub(crate) fn read_resp_array<R: BufRead>(reader: &mut R) -> io::Result<Option<V
     Ok(Some(args))
 }
 
-/// Send a RESP Array of Bulk Strings:
-///   *<N>\r\n
-///   $<len1>\r\n<item1>\r\n
-///   $<len2>\r\n<item2>\r\n
-///   …
-///
-/// For example, `&["PING"]` becomes `*1\r\n$4\r\nPING\r\n`.
-pub(crate) fn write_resp_array<W: Write>(writer: &mut W, items: &[&str]) -> io::Result<()> {
-    // 1) Array header
-    write!(writer, "*{}\r\n", items.len())?;
-    // 2) Each element as a Bulk String
+/// *<N>\r\n then N bulk‐strings
+pub fn write_array(out: &mut dyn Write, items: &[&str]) -> io::Result<()> {
+    write!(out, "*{}\r\n", items.len())?;
     for &item in items {
-        // reuse your write_bulk_string helper
-        write_bulk_string(writer, item)?;
+        write_bulk_string(out, item)?;
     }
     Ok(())
 }
 
-/// Send a Bulk String response: `$<len>\r\n<data>\r\n`
-pub(crate) fn write_bulk_string<W: Write>(writer: &mut W, data: &str) -> io::Result<()> {
-    write!(writer, "${}\r\n", data.len())?;
-    writer.write_all(data.as_bytes())?;
-    writer.write_all(b"\r\n")
+/// +<string>\r\n
+pub fn write_simple_string(out: &mut dyn Write, s: &str) -> io::Result<()> {
+    write!(out, "+{}\r\n", s)
+}
+
+/// -ERR <msg>\r\n
+pub fn write_error(out: &mut dyn Write, msg: &str) -> io::Result<()> {
+    write!(out, "-ERR {}\r\n", msg)
+}
+
+/// $<len>\r\n<data>\r\n
+pub fn write_bulk_string(out: &mut dyn Write, data: &str) -> io::Result<()> {
+    write!(out, "${}\r\n{}\r\n", data.len(), data)
+}
+
+/// Return `false` (and write an ERR) if `args.len() != expected`.
+pub fn check_len(
+    out: &mut dyn Write,
+    args: &[String],
+    expected: usize,
+    usage: &str,
+) -> bool {
+    if args.len() != expected {
+        let _ = write_error(out, usage);
+        false
+    } else {
+        true
+    }
 }

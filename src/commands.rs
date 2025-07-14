@@ -1,74 +1,103 @@
-use std::{
-    collections::HashMap,
-    io::{self, Write},
-    sync::{Mutex},
-};
+use std::collections::HashMap;
+use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
-use crate::config::ServerConfig;
-use crate::resp::write_bulk_string;
 
-pub(crate) type Store = Mutex<HashMap<String, (String, Option<SystemTime>)>>;
+use crate::config::ServerConfig;
+use crate::resp::{
+    write_simple_string, write_error, write_bulk_string, check_len,
+};
+use crate::rdb::Store;
+
+/// A little context bundling everything cmds might need
+pub struct Context<'a> {
+    pub cfg: &'a ServerConfig,
+    pub store: &'a Store,
+}
+
+/// Every command has this signature
+pub type CmdFn = fn(out: &mut dyn Write, args: &[String], ctx: &Context) -> io::Result<()>;
+
+/// Build the command registry once
+pub fn make_registry() -> HashMap<String, CmdFn> {
+    let mut m = HashMap::new();
+    m.insert("PING".into(), cmd_ping as CmdFn);
+    m.insert("ECHO".into(), cmd_echo as CmdFn);
+    m.insert("SET".into(), cmd_set as CmdFn);
+    m.insert("GET".into(), cmd_get as CmdFn);
+    m.insert("CONFIG".into(), cmd_config as CmdFn);
+    m.insert("KEYS".into(), cmd_keys as CmdFn);
+    m.insert("INFO".into(), cmd_info as CmdFn);
+    m.insert("REPLCONF".into(), cmd_replconf as CmdFn);
+    m
+}
 
 /// PING -> +PONG
-pub fn cmd_ping<W: Write>(out: &mut W) -> io::Result<()> {
-    out.write_all(b"+PONG\r\n")
+pub fn cmd_ping(
+    out: &mut dyn Write,
+    _args: &[String],
+    _ctx: &Context,
+) -> io::Result<()> {
+    write_simple_string(out, "PONG")
 }
 
 /// ECHO <msg> -> BulkString(msg)
-pub fn cmd_echo<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
-    if args.len() == 2 {
-        write_bulk_string(out, &args[1])
-    } else {
-        out.write_all(b"-ERR wrong number of arguments for 'echo'\r\n")
+pub fn cmd_echo(
+    out: &mut dyn Write,
+    args: &[String],
+    _ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 2, "usage: ECHO <msg>") {
+        return Ok(());
     }
+    write_bulk_string(out, &args[1])
 }
 
 /// SET key value [PX ms]
-pub fn cmd_set<W: Write>(
-    out: &mut W,
+pub fn cmd_set(
+    out: &mut dyn Write,
     args: &[String],
-    store: &Store,
+    ctx: &Context,
 ) -> io::Result<()> {
-    match args.len() {
-        3 => {
-            let mut m = store.lock().unwrap();
-            m.insert(args[1].clone(), (args[2].clone(), None));
-            out.write_all(b"+OK\r\n")
-        }
-        5 if args[3].eq_ignore_ascii_case("PX") => {
-            if let Ok(ms) = args[4].parse::<u64>() {
-                // record a SystemTime expiry
-                let expiry = SystemTime::now()
-                    .checked_add(Duration::from_millis(ms))
-                    .unwrap();
-                let mut m = store.lock().unwrap();
-                m.insert(args[1].clone(), (args[2].clone(), Some(expiry)));
-                out.write_all(b"+OK\r\n")
-            } else {
-                out.write_all(b"-ERR invalid PX value\r\n")
-            }
-        }
-        _ => out.write_all(b"-ERR wrong number of arguments for 'set'\r\n"),
+    if args.len() != 3 && args.len() != 5 {
+        write_error(out, "usage: SET <key> <val> [PX ms]")?;
+        return Ok(());
     }
+
+    let key = &args[1];
+    let val = &args[2];
+    let mut map = ctx.store.lock().unwrap();
+
+    if args.len() == 3 {
+        map.insert(key.clone(), (val.clone(), None));
+    } else {
+        let ms = args[4].parse::<u64>().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "PX must be integer")
+        })?;
+        let expiry = SystemTime::now()
+            .checked_add(Duration::from_millis(ms))
+            .unwrap();
+        map.insert(key.clone(), (val.clone(), Some(expiry)));
+    }
+
+    write_simple_string(out, "OK")
 }
 
-/// GET key -> BulkString or NullBulk if missing/expired
-pub fn cmd_get<W: Write>(
-    out: &mut W,
+/// GET key -> BulkString or NullBulk
+pub fn cmd_get(
+    out: &mut dyn Write,
     args: &[String],
-    store: &Store,
+    ctx: &Context,
 ) -> io::Result<()> {
-    if args.len() != 2 {
-        return out.write_all(b"-ERR wrong number of arguments for 'get'\r\n");
+    if !check_len(out, args, 2, "usage: GET <key>") {
+        return Ok(());
     }
-    let key = &args[1];
-    let mut m = store.lock().unwrap();
 
-    if let Some((val, opt_expiry)) = m.get(key).cloned() {
-        // if there's an expiry, and it's passed, delete and return NULL
-        if let Some(expiry) = opt_expiry {
-            if SystemTime::now() >= expiry {
-                m.remove(key);
+    let key = &args[1];
+    let mut map = ctx.store.lock().unwrap();
+    if let Some((val, opt_expiry)) = map.get(key).cloned() {
+        if let Some(exp) = opt_expiry {
+            if SystemTime::now() >= exp {
+                map.remove(key);
                 return out.write_all(b"$-1\r\n");
             }
         }
@@ -79,78 +108,86 @@ pub fn cmd_get<W: Write>(
 }
 
 /// CONFIG GET <dir|dbfilename>
-pub fn cmd_config<W: Write>(
-    out: &mut W,
+pub fn cmd_config(
+    out: &mut dyn Write,
     args: &[String],
-    cfg: &ServerConfig,
+    ctx: &Context,
 ) -> io::Result<()> {
-    if args.len() == 3 && args[1].eq_ignore_ascii_case("GET") {
-        let key = args[2].as_str();
-        let value = match key {
-            "dir" => &cfg.dir,
-            "dbfilename" => &cfg.dbfilename,
-            _ => return out.write_all(b"-ERR unknown config parameter\r\n"),
-        };
-        // RESP Array of two Bulk Strings
-        write!(out, "*2\r\n")?;
-        write_bulk_string(out, key)?;
-        write_bulk_string(out, value)?;
-        Ok(())
-    } else {
-        out.write_all(b"-ERR wrong number of arguments for 'CONFIG'\r\n")
+    if !check_len(out, args, 3, "usage: CONFIG GET <dir|dbfilename>") {
+        return Ok(());
     }
+
+    let key = &args[2];
+    let val = match key.as_str() {
+        "dir"        => &ctx.cfg.dir,
+        "dbfilename" => &ctx.cfg.dbfilename,
+        _ => {
+            write_error(out, "unknown config parameter")?;
+            return Ok(());
+        }
+    };
+
+    // array of two bulk-strings
+    out.write_all(format!("*2\r\n").as_bytes())?;
+    write_bulk_string(out, key)?;
+    write_bulk_string(out, val)
 }
 
 /// KEYS "*"
-pub fn cmd_keys<W: Write>(
-    out: &mut W,
+pub fn cmd_keys(
+    out: &mut dyn Write,
     args: &[String],
-    store: &Store,
+    ctx: &Context,
 ) -> io::Result<()> {
-    if args.len() != 2 || args[1] != "*" {
-        return out.write_all(b"-ERR only '*' pattern supported\r\n");
+    if !check_len(out, args, 2, "usage: KEYS *") {
+        return Ok(());
     }
-    let map = store.lock().unwrap();
-    let mut keys: Vec<&String> = map.keys().collect();
-    keys.sort(); // deterministic order
-    write!(out, "*{}\r\n", keys.len())?;
-    for key in keys {
-        write_bulk_string(out, key)?;
+    if args[1] != "*" {
+        write_error(out, "only '*' supported")?;
+        return Ok(());
+    }
+
+    let map = ctx.store.lock().unwrap();
+    let mut ks: Vec<&String> = map.keys().collect();
+    ks.sort();
+
+    write!(out, "*{}\r\n", ks.len())?;
+    for &k in &ks {
+        write_bulk_string(out, k)?;
     }
     Ok(())
 }
 
-/// INFO [section]
-/// In this stage we only support the "replication" section
-pub fn cmd_info<W: Write>(
-    out: &mut W,
+/// INFO replication
+pub fn cmd_info(
+    out: &mut dyn Write,
     args: &[String],
-    cfg: &ServerConfig
+    ctx: &Context,
 ) -> io::Result<()> {
-    if args.len() == 2 && args[1].eq_ignore_ascii_case("replication") {
-        // build one CRLF‐delimited string with all the fields:
+    if !check_len(out, args, 2, "usage: INFO replication") {
+        return Ok(());
+    }
+    if args[1].eq_ignore_ascii_case("replication") {
         let info = format!(
             "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-            cfg.role,
-            cfg.master_replid,
-            cfg.master_repl_offset
+            ctx.cfg.role,
+            ctx.cfg.master_replid,
+            ctx.cfg.master_repl_offset,
         );
-        // this single call will emit:
-        // $<len>\r\nrole:master\r\nmaster_replid:<id>\r\nmaster_repl_offset:<offset>\r\n
         write_bulk_string(out, &info)
     } else {
-        // unsupported section → empty bulk string
         write_bulk_string(out, "")
     }
 }
 
 /// REPLCONF <option> <value>
-/// For now we just always reply +OK
-pub fn cmd_replconf<W: Write>(out: &mut W, args: &[String]) -> io::Result<()> {
-    if args.len() == 3 {
-        // valid form: REPLCONF <opt> <val>
-        out.write_all(b"+OK\r\n")
-    } else {
-        out.write_all(b"-ERR wrong number of arguments for 'REPLCONF'\r\n")
+pub fn cmd_replconf(
+    out: &mut dyn Write,
+    args: &[String],
+    _ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 3, "usage: REPLCONF <option> <value>") {
+        return Ok(());
     }
+    write_simple_string(out, "OK")
 }
