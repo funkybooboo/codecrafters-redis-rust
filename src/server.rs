@@ -64,9 +64,9 @@ pub fn handle_client(
 /// Continuously read RESP arrays from the master‐connection,
 /// apply only write‐type commands (e.g. SET) to `store`, and never send replies.
 pub fn replication_loop(
-    mut stream: TcpStream,
+    stream: TcpStream,
     store: Arc<Store>,
-    cfg: Arc<ServerConfig>,
+    _cfg: Arc<ServerConfig>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
 
