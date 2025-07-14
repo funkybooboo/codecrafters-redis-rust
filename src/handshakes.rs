@@ -14,7 +14,7 @@ use crate::utils::wait_for_it;
 ///    -> +OK
 /// 4) PSYNC ? -1
 ///    -> +FULLRESYNC <replid> 0
-pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<()> {
+pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<TcpStream> {
     // Connect to the master
     let mut master = TcpStream::connect((&cfg.master_host[..], cfg.master_port))?;
 
@@ -38,5 +38,5 @@ pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<()> {
     // Wait for +FULLRESYNC …\r\n (we'll parse it later)
     let _ = wait_for_it(&mut master)?;
 
-    Ok(())
+    Ok(master)
 }

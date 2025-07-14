@@ -62,24 +62,44 @@ pub fn cmd_echo(
     write_bulk_string(out, &args[1])
 }
 
-/// SET key value [PX ms]
 pub fn cmd_set(
     out: &mut TcpStream,
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
+    match apply_set(args, &ctx.store) {
+        Ok(()) => write_simple_string(out, "OK"),
+        Err(e) => {
+            // send back an error if args were malformed
+            write_error(out, &e.to_string())?;
+            Ok(())
+        }
+    }
+}
+
+/// Exactly the store-mutation logic from `cmd_set`, but no RESP output.
+pub fn apply_set(
+    args: &[String],
+    store: &Store,
+) -> io::Result<()> {
+    // validate
     if args.len() != 3 && args.len() != 5 {
-        write_error(out, "usage: SET <key> <val> [PX ms]")?;
-        return Ok(());
+        // here we return Err so callers can decide what to do;
+        // cmd_set will turn it into a write_error(out,…)
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: SET <key> <val> [PX ms]",
+        ));
     }
 
     let key = &args[1];
     let val = &args[2];
-    let mut map = ctx.store.lock().unwrap();
+    let mut map = store.lock().unwrap();
 
     if args.len() == 3 {
         map.insert(key.clone(), (val.clone(), None));
     } else {
+        // args == 5
         let ms = args[4].parse::<u64>().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "PX must be integer")
         })?;
@@ -89,7 +109,7 @@ pub fn cmd_set(
         map.insert(key.clone(), (val.clone(), Some(expiry)));
     }
 
-    write_simple_string(out, "OK")
+    Ok(())
 }
 
 /// GET key -> BulkString or NullBulk

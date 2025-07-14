@@ -13,7 +13,7 @@ use crate::config::parse_config;
 use crate::handshakes::replica_handshake;
 use crate::rdb::load_rdb_snapshot;
 use crate::role::Role;
-use crate::server::handle_client;
+use crate::server::{handle_client, replication_loop};
 
 fn main() -> io::Result<()> {
     // 1) CLI flags
@@ -21,15 +21,28 @@ fn main() -> io::Result<()> {
 
     let replicas: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // Part 1 of replica handshake: send PING to master
-    if cfg.role == Role::Slave {
-        replica_handshake(&cfg)?;
-    }
+    // If we're a replica, connect & handshake *and* keep that socket
+    let maybe_replication_stream = if cfg.role == Role::Slave {
+        Some(replica_handshake(&cfg)?)
+    } else {
+        None
+    };
 
     // 2) Load every (key, (value, expiry?)) from RDB
     let snapshot = load_rdb_snapshot(format!("{}/{}", cfg.dir, cfg.dbfilename))?;
     let store = Arc::new(Mutex::new(snapshot));
     let cfg = Arc::new(cfg);
+
+    // 2b) If replica, spawn the propagation‐processor
+    if let Some(replica_stream) = maybe_replication_stream {
+        let store_clone = Arc::clone(&store);
+        let cfg_clone   = Arc::clone(&cfg);
+        std::thread::spawn(move || {
+            if let Err(e) = replication_loop(replica_stream, store_clone, cfg_clone) {
+                eprintln!("replication error: {}", e);
+            }
+        });
+    }
 
     // 3) Serve
     let listener = TcpListener::bind(format!("127.0.0.1:{}", cfg.port))?;
