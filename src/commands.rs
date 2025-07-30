@@ -299,10 +299,10 @@ pub fn cmd_lrange(
     }
 
     let key = &args[1];
-    let start = args[2].parse::<usize>().unwrap_or(usize::MAX);
-    let stop = args[3].parse::<usize>().unwrap_or(usize::MAX);
+    let start_raw = args[2].parse::<isize>().unwrap_or(isize::MAX);
+    let stop_raw = args[3].parse::<isize>().unwrap_or(isize::MAX);
 
-    if start == usize::MAX || stop == usize::MAX {
+    if start_raw == isize::MAX || stop_raw == isize::MAX {
         write_error(out, "ERR start/stop must be integers")?;
         return Ok(());
     }
@@ -311,13 +311,27 @@ pub fn cmd_lrange(
 
     match map.get(key) {
         Some((Value::List(list), _)) => {
+            let len = list.len() as isize;
+
+            // Convert negative indexes
+            let start = if start_raw < 0 {
+                (len + start_raw).max(0)
+            } else {
+                start_raw
+            } as usize;
+
+            let stop = if stop_raw < 0 {
+                (len + stop_raw).max(0)
+            } else {
+                stop_raw
+            } as usize;
+
+            // Edge cases
             if start > stop || start >= list.len() {
-                // Empty array
                 write!(out, "*0\r\n")?;
                 return Ok(());
             }
 
-            // Compute range: stop is inclusive, but slicing is exclusive
             let stop = stop.min(list.len() - 1);
             let slice = &list[start..=stop];
 
@@ -330,7 +344,6 @@ pub fn cmd_lrange(
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
         }
         None => {
-            // Key doesn't exist — respond with empty array
             write!(out, "*0\r\n")?;
         }
     }
