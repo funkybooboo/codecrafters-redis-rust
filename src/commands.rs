@@ -823,23 +823,50 @@ pub fn cmd_xrange(
         }
     };
 
-    // 3) Helpers to parse "ms-seq" or "ms"-only IDs
-    fn parse_id(raw: &str) -> Result<(u64, u64), ()> {
+    // 3) Parser for IDs (with defaults)
+    fn parse_start(raw: &str) -> Result<(u64, u64), ()> {
+        if raw == "-" {
+            // from the beginning
+            return Ok((0, 0));
+        }
         if let Some(pos) = raw.find('-') {
+            // explicit ms-seq
             let mut parts = raw.splitn(2, '-');
-            let ms_str  = parts.next().unwrap();
-            let seq_str = parts.next().unwrap();
-            let ms  = ms_str.parse().map_err(|_| ())?;
-            let seq = seq_str.parse().map_err(|_| ())?;
+            let ms  = parts.next().unwrap().parse().map_err(|_| ())?;
+            let seq = parts.next().unwrap().parse().map_err(|_| ())?;
             Ok((ms, seq))
         } else {
+            // ms-only => seq=0
             let ms = raw.parse().map_err(|_| ())?;
             Ok((ms, 0))
         }
     }
 
-    // 4) Parse start ID (default seq=0)
-    let (start_ms, start_seq) = match parse_id(start_raw) {
+    fn parse_end(raw: &str, entries: &[StreamEntry]) -> Result<(u64, u64), ()> {
+        if let Some(pos) = raw.find('-') {
+            // explicit ms-seq
+            let mut parts = raw.splitn(2, '-');
+            let ms  = parts.next().unwrap().parse().map_err(|_| ())?;
+            let seq = parts.next().unwrap().parse().map_err(|_| ())?;
+            Ok((ms, seq))
+        } else {
+            // ms-only => find max seq at that ms
+            let ms = raw.parse().map_err(|_| ())?;
+            let max_seq = entries.iter()
+                .filter_map(|e| {
+                    let mut p = e.id.splitn(2, '-');
+                    let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                    let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                    if t == ms { Some(s) } else { None }
+                })
+                .max()
+                .unwrap_or(0);
+            Ok((ms, max_seq))
+        }
+    }
+
+    // 4) Parse the bounds
+    let (start_ms, start_seq) = match parse_start(start_raw) {
         Ok(x) => x,
         Err(_) => {
             write_error(out, "ERR invalid start ID format")?;
@@ -847,60 +874,34 @@ pub fn cmd_xrange(
         }
     };
 
-    // 5) Parse end ID (if no "-seq", default seq = max seen for that ms)
-    let (end_ms, end_seq) = if end_raw.contains('-') {
-        // explicit
-        match parse_id(end_raw) {
-            Ok(x) => x,
-            Err(_) => {
-                write_error(out, "ERR invalid end ID format")?;
-                return Ok(());
-            }
+    let (end_ms, end_seq) = match parse_end(end_raw, &entries) {
+        Ok(x) => x,
+        Err(_) => {
+            write_error(out, "ERR invalid end ID format")?;
+            return Ok(());
         }
-    } else {
-        // ms-only ⇒ find max seq among entries with that ms
-        let ms = match end_raw.parse::<u64>() {
-            Ok(n) => n,
-            Err(_) => {
-                write_error(out, "ERR invalid end ID format")?;
-                return Ok(());
-            }
-        };
-        let max_seq = entries.iter()
-            .filter_map(|e| {
-                let mut p = e.id.splitn(2, '-');
-                let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
-                let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
-                if t == ms { Some(s) } else { None }
-            })
-            .max()
-            .unwrap_or(0);
-        (ms, max_seq)
     };
 
-    // 6) Filter the cloned entries by ID range (inclusive)
-    let mut result: Vec<StreamEntry> = entries.into_iter()
+    // 5) Filter entries in-range (inclusive)
+    let mut filtered: Vec<StreamEntry> = entries.into_iter()
         .filter(|e| {
             let mut p = e.id.splitn(2, '-');
             let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-
-            // start_ms/start_seq <= (ems,eseq) <= end_ms/end_seq
+            // start <= this <= end
             (ems > start_ms || (ems == start_ms && eseq >= start_seq)) &&
                 (ems < end_ms   || (ems == end_ms   && eseq <= end_seq))
         })
         .collect();
 
-    // 7) Write RESP array of entries
-    write!(out, "*{}\r\n", result.len())?;
-    for entry in result {
-        // each entry is a 2-element array: [ ID , [k,v,k,v,…] ]
+    // 6) Write RESP array
+    write!(out, "*{}\r\n", filtered.len())?;
+    for entry in filtered {
+        // each entry is [ ID , [k,v,k,v...] ]
         write!(out, "*2\r\n")?;
-        // 7a) ID as bulk string
         write_bulk_string(out, &entry.id)?;
-        // 7b) the flat list of k,v,k,v…
-        let kvs = entry.fields.len() * 2;
-        write!(out, "*{}\r\n", kvs)?;
+        let kv_count = entry.fields.len() * 2;
+        write!(out, "*{}\r\n", kv_count)?;
         for (k, v) in entry.fields {
             write_bulk_string(out, &k)?;
             write_bulk_string(out, &v)?;
