@@ -635,69 +635,114 @@ pub fn cmd_xadd(
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
+    // 1) Validate argument count
     if args.len() < 5 || (args.len() - 3) % 2 != 0 {
         write_error(out, "usage: XADD <key> <id> <field> <value> [<field> <value> ...]")?;
         return Ok(());
     }
 
     let key    = &args[1];
-    let id_str = &args[2];
+    let id_raw = &args[2];
 
-    // parse "<ms>-<seq>"
-    let mut parts = id_str.splitn(2, '-');
-    let ms  = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let seq = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // --- Determine (ms, seq) and final_id_str ---
+    let (ms, seq, final_id_str) = if let Some(ms_str) = id_raw.strip_suffix("-*") {
+        // Auto‑sequence case: "<ms>-*"
+        let ms = ms_str.parse::<u64>().unwrap_or_else(|_| {
+            // malformed time part
+            write_error(out, "The ID specified in XADD has invalid format").ok();
+            std::process::exit(0);
+        });
 
-    // find last entry ID, defaulting to (0,0)
-    let (last_ms, last_seq) = {
-        let map = ctx.store.lock().unwrap();
-        if let Some((Value::Stream(entries), _)) = map.get(key) {
-            if let Some(last) = entries.last() {
-                let mut p = last.id.splitn(2, '-');
-                let lms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
-                let lseq = p.next().unwrap().parse::<u64>().unwrap_or(0);
-                (lms, lseq)
+        // Scan existing entries for this key to find max seq at this ms
+        let max_seq_for_ms = {
+            let map = ctx.store.lock().unwrap();
+            if let Some((Value::Stream(entries), _)) = map.get(key) {
+                entries.iter()
+                    .filter_map(|e| {
+                        let mut p = e.id.splitn(2, '-');
+                        let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                        let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                        if t == ms { Some(s) } else { None }
+                    })
+                    .max()
+            } else {
+                None
+            }
+        };
+
+        // Default seq = 1 if ms == 0, else 0; then bump by one if we saw something
+        let base = if ms == 0 { 1 } else { 0 };
+        let seq = max_seq_for_ms.map(|n| n + 1).unwrap_or(base);
+        let final_id = format!("{}-{}", ms, seq);
+        (ms, seq, final_id)
+
+    } else {
+        // Explicit case: "<ms>-<seq>"
+        let mut parts = id_raw.splitn(2, '-');
+        let ms = parts.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+            write_error(out, "The ID specified in XADD has invalid format").ok();
+            std::process::exit(0);
+        });
+        let seq = parts.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+            write_error(out, "The ID specified in XADD has invalid format").ok();
+            std::process::exit(0);
+        });
+        (ms, seq, id_raw.clone())
+    };
+
+    // --- If this was explicit, enforce monotonic ordering against the overall last-entry ---
+    if !id_raw.ends_with("-*") {
+        let (last_ms, last_seq) = {
+            let map = ctx.store.lock().unwrap();
+            if let Some((Value::Stream(entries), _)) = map.get(key) {
+                if let Some(last) = entries.last() {
+                    let mut p   = last.id.splitn(2, '-');
+                    let lms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                    let lseq = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                    (lms, lseq)
+                } else {
+                    (0, 0)
+                }
             } else {
                 (0, 0)
             }
-        } else {
-            (0, 0)
-        }
-    };
+        };
 
-    // reject if new ID ≤ last ID, with a special case for 0-0
-    let is_minimum = ms == 0 && seq == 0;
-    if ms < last_ms || (ms == last_ms && seq <= last_seq) {
-        if is_minimum {
-            write_error(out, "The ID specified in XADD must be greater than 0-0")?;
-        } else {
-            write_error(out, "The ID specified in XADD is equal or smaller than the target stream top item")?;
+        // Special check for the 0-0 minimum
+        let is_minimum = ms == 0 && seq == 0;
+        if ms < last_ms || (ms == last_ms && seq <= last_seq) {
+            if is_minimum {
+                write_error(out, "The ID specified in XADD must be greater than 0-0")?;
+            } else {
+                write_error(out, "The ID specified in XADD is equal or smaller than the target stream top item")?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
-    // build fields and insert...
+    // --- All good: build the entry and insert it ---
     let fields: Vec<(String, String)> = args[3..]
         .chunks(2)
-        .map(|c| (c[0].clone(), c[1].clone()))
+        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
         .collect();
 
-    let mut store_map = ctx.store.lock().unwrap();
-    match store_map.get_mut(key) {
+    let mut map = ctx.store.lock().unwrap();
+    match map.get_mut(key) {
         Some((Value::Stream(ref mut entries), _)) => {
-            entries.push(StreamEntry { id: id_str.clone(), fields });
+            entries.push(StreamEntry { id: final_id_str.clone(), fields });
         }
         Some(_) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
             return Ok(());
         }
         None => {
-            store_map.insert(
+            map.insert(
                 key.clone(),
-                (Value::Stream(vec![StreamEntry { id: id_str.clone(), fields }]), None),
+                (Value::Stream(vec![StreamEntry { id: final_id_str.clone(), fields }]), None),
             );
         }
     }
 
-    write_bulk_string(out, id_str)
+    // 4) Reply with the new ID
+    write_bulk_string(out, &final_id_str)
 }
