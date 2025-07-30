@@ -911,29 +911,30 @@ pub fn cmd_xread(
         None
     };
 
-    // 2) Next must be STREAMS
+    // 2) Expect "STREAMS"
     if args.get(idx).map(|s| s.to_lowercase()) != Some("streams".into()) {
         write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
         return Ok(());
     }
     idx += 1;
 
-    // 3) Determine number of streams (keys) == number of start-IDs
+    // 3) We must have an equal number of keys and start-IDs
     let rem = args.len() - idx;
     if rem < 2 || rem % 2 != 0 {
         write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
         return Ok(());
     }
-    let streams = rem / 2;
-    let keys   = &args[idx..idx+streams];
-    let starts = &args[idx+streams..];
+    let n_streams = rem / 2;
+    let keys   = &args[idx..idx + n_streams];
+    let starts = &args[idx + n_streams..];
 
-    // Helper to collect matching entries > start-ID
-    let collect = || {
+    // Helper: collect all new entries > each start-ID
+    let collect = || -> Result<Vec<(String, Vec<StreamEntry>)>, ()> {
         let store = ctx.store.lock().unwrap();
-        let mut out = Vec::new();
+        let mut result = Vec::with_capacity(n_streams);
+
         for (key, start_raw) in keys.iter().zip(starts.iter()) {
-            // parse start
+            // parse start: "ms-seq" or "ms"
             let (start_ms, start_seq) = if let Some(_) = start_raw.find('-') {
                 let mut p = start_raw.splitn(2, '-');
                 let ms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
@@ -947,18 +948,14 @@ pub fn cmd_xread(
             // fetch or type-error
             let entries = match store.get(key) {
                 Some((Value::Stream(v), _)) => v.clone(),
-                Some(_) => {
-                    // WRONGTYPE
-                    out.clear();
-                    return Err(());
-                }
-                None => Vec::new(),
+                Some(_) => return Err(()),
+                None    => Vec::new(),
             };
 
-            // filter
+            // filter IDs > start
             let filtered = entries.into_iter()
                 .filter(|e| {
-                    let mut p   = e.id.splitn(2, '-');
+                    let mut p    = e.id.splitn(2, '-');
                     let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                     let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                     ems > start_ms || (ems == start_ms && eseq > start_seq)
@@ -966,48 +963,72 @@ pub fn cmd_xread(
                 .collect::<Vec<_>>();
 
             if !filtered.is_empty() {
-                out.push((key.clone(), filtered));
+                result.push((key.clone(), filtered));
             }
         }
-        Ok(out)
+
+        Ok(result)
     };
 
-    // 4) First try immediately
+    // 4) First attempt
     let mut results = match collect() {
         Ok(r) => r,
-        Err(_) => { write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?; return Ok(()); }
+        Err(_) => {
+            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+            return Ok(());
+        }
     };
 
-    // 5) If no data and blocking requested, poll until timeout
+    // 5) If no results and blocking requested...
     if results.is_empty() {
-        if let Some(ms) = block_ms {
-            let deadline = Instant::now() + Duration::from_millis(ms);
-            while Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-                results = match collect() {
-                    Ok(r) => r,
-                    Err(_) => { write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?; return Ok(()); }
-                };
-                if !results.is_empty() {
-                    break;
+        match block_ms {
+            None => {
+                // non-blocking empty → immediate empty array
+                out.write_all(b"*0\r\n")?;
+                return Ok(());
+            }
+            Some(0) => {
+                // infinite wait
+                loop {
+                    thread::sleep(Duration::from_millis(10));
+                    results = match collect() {
+                        Ok(r) => r,
+                        Err(_) => {
+                            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                            return Ok(());
+                        }
+                    };
+                    if !results.is_empty() {
+                        break;
+                    }
+                }
+            }
+            Some(ms) => {
+                // timed wait
+                let deadline = Instant::now() + Duration::from_millis(ms);
+                while Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                    results = match collect() {
+                        Ok(r) => r,
+                        Err(_) => {
+                            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                            return Ok(());
+                        }
+                    };
+                    if !results.is_empty() {
+                        break;
+                    }
+                }
+                if results.is_empty() {
+                    // timeout => null bulk string
+                    out.write_all(b"$-1\r\n")?;
+                    return Ok(());
                 }
             }
         }
     }
 
-    // 6) If still empty and we were blocking, return nil bulk string
-    if results.is_empty() && block_ms.is_some() {
-        out.write_all(b"$-1\r\n")?;
-        return Ok(());
-    }
-
-    // 7) If empty and non-blocking, return empty array
-    if results.is_empty() {
-        out.write_all(b"*0\r\n")?;
-        return Ok(());
-    }
-
-    // 8) Encode results as RESP multi-bulk
+    // 6) Finally, encode whatever we have (at least one stream)
     write!(out, "*{}\r\n", results.len())?;
     for (key, entries) in results {
         write!(out, "*2\r\n")?;
