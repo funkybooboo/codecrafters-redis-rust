@@ -49,6 +49,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("BLPOP".into(), cmd_blpop as CmdFn);
     m.insert("TYPE".into(), cmd_type as CmdFn);
     m.insert("XADD".into(), cmd_xadd as CmdFn);
+    m.insert("XRANGE".into(), cmd_xrange as CmdFn);
     m
 }
 
@@ -789,4 +790,122 @@ pub fn cmd_xadd(
 
     // 5) Reply with the chosen ID
     write_bulk_string(out, &final_id)
+}
+
+pub fn cmd_xrange(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    // 1) Usage check
+    if args.len() != 4 {
+        write_error(out, "usage: XRANGE <key> <start> <end>")?;
+        return Ok(());
+    }
+    let key       = &args[1];
+    let start_raw = &args[2];
+    let end_raw   = &args[3];
+
+    // 2) Grab & clone the stream entries (or early-return on missing/key-type)
+    let entries: Vec<StreamEntry> = {
+        let map = ctx.store.lock().unwrap();
+        match map.get(key) {
+            None => {
+                // no such key ⇒ empty result
+                out.write_all(b"*0\r\n")?;
+                return Ok(());
+            }
+            Some((Value::Stream(v), _)) => v.clone(),
+            Some(_) => {
+                write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                return Ok(());
+            }
+        }
+    };
+
+    // 3) Helpers to parse "ms-seq" or "ms"-only IDs
+    fn parse_id(raw: &str) -> Result<(u64, u64), ()> {
+        if let Some(pos) = raw.find('-') {
+            let mut parts = raw.splitn(2, '-');
+            let ms_str  = parts.next().unwrap();
+            let seq_str = parts.next().unwrap();
+            let ms  = ms_str.parse().map_err(|_| ())?;
+            let seq = seq_str.parse().map_err(|_| ())?;
+            Ok((ms, seq))
+        } else {
+            let ms = raw.parse().map_err(|_| ())?;
+            Ok((ms, 0))
+        }
+    }
+
+    // 4) Parse start ID (default seq=0)
+    let (start_ms, start_seq) = match parse_id(start_raw) {
+        Ok(x) => x,
+        Err(_) => {
+            write_error(out, "ERR invalid start ID format")?;
+            return Ok(());
+        }
+    };
+
+    // 5) Parse end ID (if no "-seq", default seq = max seen for that ms)
+    let (end_ms, end_seq) = if end_raw.contains('-') {
+        // explicit
+        match parse_id(end_raw) {
+            Ok(x) => x,
+            Err(_) => {
+                write_error(out, "ERR invalid end ID format")?;
+                return Ok(());
+            }
+        }
+    } else {
+        // ms-only ⇒ find max seq among entries with that ms
+        let ms = match end_raw.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                write_error(out, "ERR invalid end ID format")?;
+                return Ok(());
+            }
+        };
+        let max_seq = entries.iter()
+            .filter_map(|e| {
+                let mut p = e.id.splitn(2, '-');
+                let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                if t == ms { Some(s) } else { None }
+            })
+            .max()
+            .unwrap_or(0);
+        (ms, max_seq)
+    };
+
+    // 6) Filter the cloned entries by ID range (inclusive)
+    let mut result: Vec<StreamEntry> = entries.into_iter()
+        .filter(|e| {
+            let mut p = e.id.splitn(2, '-');
+            let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+            // start_ms/start_seq <= (ems,eseq) <= end_ms/end_seq
+            (ems > start_ms || (ems == start_ms && eseq >= start_seq)) &&
+                (ems < end_ms   || (ems == end_ms   && eseq <= end_seq))
+        })
+        .collect();
+
+    // 7) Write RESP array of entries
+    write!(out, "*{}\r\n", result.len())?;
+    for entry in result {
+        // each entry is a 2-element array: [ ID , [k,v,k,v,…] ]
+        write!(out, "*2\r\n")?;
+        // 7a) ID as bulk string
+        write_bulk_string(out, &entry.id)?;
+        // 7b) the flat list of k,v,k,v…
+        let kvs = entry.fields.len() * 2;
+        write!(out, "*{}\r\n", kvs)?;
+        for (k, v) in entry.fields {
+            write_bulk_string(out, &k)?;
+            write_bulk_string(out, &v)?;
+        }
+    }
+
+    Ok(())
 }
