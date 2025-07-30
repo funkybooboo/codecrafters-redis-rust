@@ -10,12 +10,14 @@ use crate::resp::{
 };
 use crate::rdb::{Store, Value, EMPTY_RDB};
 use crate::role::Role;
+use crate::server::BlockingList;
 
 /// A little context bundling everything cmds might need
 pub struct Context<'a> {
     pub cfg: &'a ServerConfig,
     pub store: &'a Store,
     pub replicas: Arc<Mutex<Vec<TcpStream>>>,
+    pub blocking: BlockingList,
 }
 
 /// Every command has this signature
@@ -43,6 +45,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("LPUSH".into(), cmd_lpush as CmdFn);
     m.insert("LLEN".into(), cmd_llen as CmdFn);
     m.insert("LPOP".into(), cmd_lpop as CmdFn);
+    m.insert("BLPOP".into(), cmd_blpop as CmdFn);
     m
 }
 
@@ -282,10 +285,36 @@ pub fn cmd_rpush(
         }
         Some((Value::String(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+            return Ok(());
         }
         None => {
             store.insert(key.clone(), (Value::List(values.to_vec()), None));
             write!(out, ":{}\r\n", values.len())?;
+        }
+    }
+
+    let mut blockers = ctx.blocking.lock().unwrap();
+    if let Some(waiters) = blockers.get_mut(key) {
+        if !waiters.is_empty() {
+            let mut client = waiters.remove(0); // FIFO: remove the first client
+            if let Some((Value::List(ref mut list), _)) = store.get_mut(key) {
+                if !list.is_empty() {
+                    let val = list.remove(0);
+                    let response = format!(
+                        "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+                        key.len(),
+                        key,
+                        val.len(),
+                        val
+                    );
+                    let _ = client.write_all(response.as_bytes());
+                }
+            }
+        }
+
+        // Cleanup if no more waiters for this key
+        if waiters.is_empty() {
+            blockers.remove(key);
         }
     }
 
@@ -484,5 +513,47 @@ pub fn cmd_lpop(
         }
     }
 
+    Ok(())
+}
+
+pub fn cmd_blpop(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if args.len() != 3 {
+        write_error(out, "usage: BLPOP <key> <timeout>")?;
+        return Ok(());
+    }
+
+    let key = &args[1];
+    let timeout = &args[2];
+
+    if timeout != "0" {
+        write_error(out, "only timeout=0 supported for now")?;
+        return Ok(());
+    }
+
+    // Try immediate pop first
+    let mut store = ctx.store.lock().unwrap();
+    if let Some((Value::List(ref mut list), _)) = store.get_mut(key) {
+        if !list.is_empty() {
+            let val = list.remove(0);
+            write!(
+                out,
+                "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+                key.len(),
+                key,
+                val.len(),
+                val
+            )?;
+            return Ok(());
+        }
+    }
+    drop(store); // release before blocking
+
+    // Block the client until RPUSH unblocks them
+    let mut blockers = ctx.blocking.lock().unwrap();
+    blockers.entry(key.clone()).or_default().push(out.try_clone()?);
     Ok(())
 }

@@ -8,18 +8,21 @@ mod handshakes;
 mod utils;
 
 use std::{io, net::TcpListener, sync::{Arc, Mutex}};
+use std::collections::HashMap;
 use std::net::TcpStream;
 use crate::config::parse_config;
 use crate::handshakes::replica_handshake;
 use crate::rdb::load_rdb_snapshot;
 use crate::role::Role;
-use crate::server::{handle_client, replication_loop};
+use crate::server::{handle_client, replication_loop, BlockingList};
 
 fn main() -> io::Result<()> {
     // 1) CLI flags
     let cfg = parse_config();
 
     let replicas: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
 
     // If we're a replica, connect & handshake *and* keep that socket
     let maybe_replication_stream = if cfg.role == Role::Slave {
@@ -53,8 +56,9 @@ fn main() -> io::Result<()> {
         let s       = Arc::clone(&store);
         let c       = Arc::clone(&cfg);
         let reps    = Arc::clone(&replicas);
+        let bc = Arc::clone(&blocking_clients);
         std::thread::spawn(move || {
-            if let Err(e) = handle_client(stream, s, c, reps) {
+            if let Err(e) = handle_client(stream, s, c, reps, bc) {
                 eprintln!("Client error: {}", e);
             }
         });

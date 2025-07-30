@@ -3,6 +3,7 @@ use std::{
     net::TcpStream,
     sync::Arc,
 };
+use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::Mutex;
 use crate::config::ServerConfig;
@@ -11,13 +12,16 @@ use crate::commands::{apply_set, is_write_cmd, make_registry, Context};
 use crate::rdb::Store;
 use crate::role::Role;
 
+pub type BlockingList = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
+
 pub fn handle_client(
     stream: TcpStream,
     store: Arc<Store>,
     cfg: Arc<ServerConfig>,
     reps: Arc<Mutex<Vec<TcpStream>>>,
+    blocking: BlockingList,
 ) -> io::Result<()> {
-    let mut reader = io::BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
     // Build the map of command names → functions
@@ -28,7 +32,7 @@ pub fn handle_client(
             continue;
         }
         let cmd_name = args[0].to_uppercase();
-        let ctx = Context { cfg: &cfg, store: &store, replicas: Arc::clone(&reps) };
+        let ctx = Context { cfg: &cfg, store: &store, replicas: Arc::clone(&reps), blocking: Arc::clone(&blocking) };
 
         if let Some(cmd_fn) = registry.get(&cmd_name) {
             // Call the matched command
