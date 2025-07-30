@@ -42,6 +42,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("LRANGE".into(), cmd_lrange as CmdFn);
     m.insert("LPUSH".into(), cmd_lpush as CmdFn);
     m.insert("LLEN".into(), cmd_llen as CmdFn);
+    m.insert("LPOP".into(), cmd_lpop as CmdFn);
     m
 }
 
@@ -412,6 +413,38 @@ pub fn cmd_llen(
         None => {
             // List doesn't exist → length 0
             write!(out, ":0\r\n")?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn cmd_lpop(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 2, "usage: LPOP <key>") {
+        return Ok(());
+    }
+
+    let key = &args[1];
+    let mut map = ctx.store.lock().unwrap();
+
+    match map.get_mut(key) {
+        Some((Value::List(ref mut list), _)) => {
+            if list.is_empty() {
+                write!(out, "$-1\r\n")?;
+            } else {
+                let popped = list.remove(0);
+                write!(out, "${}\r\n{}\r\n", popped.len(), popped)?;
+            }
+        }
+        Some((Value::String(_), _)) => {
+            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+        }
+        None => {
+            write!(out, "$-1\r\n")?;
         }
     }
 
