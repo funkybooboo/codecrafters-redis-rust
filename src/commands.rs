@@ -894,6 +894,7 @@ pub fn cmd_xrange(
     Ok(())
 }
 
+/// XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]
 pub fn cmd_xread(
     out: &mut TcpStream,
     args: &[String],
@@ -902,7 +903,7 @@ pub fn cmd_xread(
     // 1) Parse optional BLOCK
     let mut idx = 1;
     let block_ms = if args.get(idx).map(|s| s.to_lowercase()) == Some("block".into()) {
-        let ms = args.get(idx+1)
+        let ms = args.get(idx + 1)
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         idx += 2;
@@ -911,14 +912,14 @@ pub fn cmd_xread(
         None
     };
 
-    // 2) Expect "STREAMS"
+    // 2) Expect STREAMS
     if args.get(idx).map(|s| s.to_lowercase()) != Some("streams".into()) {
         write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
         return Ok(());
     }
     idx += 1;
 
-    // 3) We must have an equal number of keys and start-IDs
+    // 3) Split keys vs starts
     let rem = args.len() - idx;
     if rem < 2 || rem % 2 != 0 {
         write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
@@ -928,31 +929,68 @@ pub fn cmd_xread(
     let keys   = &args[idx..idx + n_streams];
     let starts = &args[idx + n_streams..];
 
-    // Helper: collect all new entries > each start-ID
-    let collect = || -> Result<Vec<(String, Vec<StreamEntry>)>, ()> {
+    // 4) **Compute static start Positions** (ms,seq) for each stream **once**
+    let mut start_positions = Vec::with_capacity(n_streams);
+    {
         let store = ctx.store.lock().unwrap();
-        let mut result = Vec::with_capacity(n_streams);
-
         for (key, start_raw) in keys.iter().zip(starts.iter()) {
-            // parse start: "ms-seq" or "ms"
-            let (start_ms, start_seq) = if let Some(_) = start_raw.find('-') {
+            // Fetch existing entries (type-error if not a stream)
+            let entries = match store.get(key) {
+                Some((Value::Stream(v), _)) => v.clone(),
+                Some(_) => {
+                    write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                    return Ok(());
+                }
+                None => Vec::new(),
+            };
+
+            // Determine (start_ms, start_seq)
+            let start_pos = if start_raw == "$" {
+                // Last ID at call time
+                entries.iter().fold((0u64, 0u64), |(lm, ls), e| {
+                    let mut p = e.id.splitn(2, '-');
+                    if let (Some(ms_s), Some(seq_s)) = (p.next(), p.next()) {
+                        if let (Ok(ms), Ok(seq)) = (ms_s.parse(), seq_s.parse()) {
+                            if ms > lm || (ms == lm && seq > ls) {
+                                return (ms, seq);
+                            }
+                        }
+                    }
+                    (lm, ls)
+                })
+            } else if let Some(_) = start_raw.find('-') {
+                // explicit "ms-seq"
                 let mut p = start_raw.splitn(2, '-');
-                let ms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
-                let seq = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                let ms  = p.next().unwrap().parse().unwrap_or(0);
+                let seq = p.next().unwrap().parse().unwrap_or(0);
                 (ms, seq)
             } else {
-                let ms = start_raw.parse::<u64>().unwrap_or(0);
+                // ms-only => seq=0
+                let ms = start_raw.parse().unwrap_or(0);
                 (ms, 0)
             };
 
-            // fetch or type-error
+            start_positions.push(start_pos);
+        }
+    }
+    // store lock dropped here
+
+    // 5) Closure to collect all new entries > static start positions
+    let collect = || -> Result<Vec<(String, Vec<StreamEntry>)>, ()> {
+        let store = ctx.store.lock().unwrap();
+        let mut out = Vec::with_capacity(n_streams);
+
+        for ((key), &(start_ms, start_seq)) in
+            keys.iter().zip(start_positions.iter())
+        {
+            // Fetch entries
             let entries = match store.get(key) {
                 Some((Value::Stream(v), _)) => v.clone(),
                 Some(_) => return Err(()),
-                None    => Vec::new(),
+                None => Vec::new(),
             };
 
-            // filter IDs > start
+            // Filter IDs strictly greater than (start_ms, start_seq)
             let filtered = entries.into_iter()
                 .filter(|e| {
                     let mut p    = e.id.splitn(2, '-');
@@ -963,14 +1001,13 @@ pub fn cmd_xread(
                 .collect::<Vec<_>>();
 
             if !filtered.is_empty() {
-                result.push((key.clone(), filtered));
+                out.push((key.clone(), filtered));
             }
         }
-
-        Ok(result)
+        Ok(out)
     };
 
-    // 4) First attempt
+    // 6) Run once immediately
     let mut results = match collect() {
         Ok(r) => r,
         Err(_) => {
@@ -979,16 +1016,16 @@ pub fn cmd_xread(
         }
     };
 
-    // 5) If no results and blocking requested...
+    // 7) If empty & blocking requested
     if results.is_empty() {
         match block_ms {
             None => {
-                // non-blocking empty → immediate empty array
+                // no BLOCK → empty array
                 out.write_all(b"*0\r\n")?;
                 return Ok(());
             }
             Some(0) => {
-                // infinite wait
+                // BLOCK 0 => wait forever
                 loop {
                     thread::sleep(Duration::from_millis(10));
                     results = match collect() {
@@ -1004,7 +1041,7 @@ pub fn cmd_xread(
                 }
             }
             Some(ms) => {
-                // timed wait
+                // BLOCK ms>0 => timed wait
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(10));
@@ -1020,7 +1057,7 @@ pub fn cmd_xread(
                     }
                 }
                 if results.is_empty() {
-                    // timeout => null bulk string
+                    // timed out → null bulk
                     out.write_all(b"$-1\r\n")?;
                     return Ok(());
                 }
@@ -1028,7 +1065,7 @@ pub fn cmd_xread(
         }
     }
 
-    // 6) Finally, encode whatever we have (at least one stream)
+    // 8) Encode final results
     write!(out, "*{}\r\n", results.len())?;
     for (key, entries) in results {
         write!(out, "*2\r\n")?;
