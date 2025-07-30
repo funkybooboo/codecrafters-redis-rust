@@ -98,7 +98,7 @@ pub fn cmd_xread(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Res
         let store = ctx.store.lock().unwrap();
         let mut out = Vec::with_capacity(n_streams);
 
-        for ((key), &(start_ms, start_seq)) in keys.iter().zip(start_positions.iter()) {
+        for (key, &(start_ms, start_seq)) in keys.iter().zip(start_positions.iter()) {
             // Fetch entries
             let entries = match store.get(key) {
                 Some((Value::Stream(v), _)) => v.clone(),
