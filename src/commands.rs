@@ -39,6 +39,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("REPLCONF".into(), cmd_replconf as CmdFn);
     m.insert("PSYNC".into(), cmd_psync as CmdFn);
     m.insert("RPUSH".into(), cmd_rpush as CmdFn);
+    m.insert("LRANGE".into(), cmd_lrange as CmdFn);
     m
 }
 
@@ -282,6 +283,55 @@ pub fn cmd_rpush(
         None => {
             store.insert(key.clone(), (Value::List(values.to_vec()), None));
             write!(out, ":{}\r\n", values.len())?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn cmd_lrange(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 4, "usage: LRANGE <key> <start> <stop>") {
+        return Ok(());
+    }
+
+    let key = &args[1];
+    let start = args[2].parse::<usize>().unwrap_or(usize::MAX);
+    let stop = args[3].parse::<usize>().unwrap_or(usize::MAX);
+
+    if start == usize::MAX || stop == usize::MAX {
+        write_error(out, "ERR start/stop must be integers")?;
+        return Ok(());
+    }
+
+    let map = ctx.store.lock().unwrap();
+
+    match map.get(key) {
+        Some((Value::List(list), _)) => {
+            if start > stop || start >= list.len() {
+                // Empty array
+                write!(out, "*0\r\n")?;
+                return Ok(());
+            }
+
+            // Compute range: stop is inclusive, but slicing is exclusive
+            let stop = stop.min(list.len() - 1);
+            let slice = &list[start..=stop];
+
+            write!(out, "*{}\r\n", slice.len())?;
+            for item in slice {
+                write!(out, "${}\r\n{}\r\n", item.len(), item)?;
+            }
+        }
+        Some((Value::String(_), _)) => {
+            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+        }
+        None => {
+            // Key doesn't exist — respond with empty array
+            write!(out, "*0\r\n")?;
         }
     }
 
