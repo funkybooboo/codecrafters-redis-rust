@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use std::thread;
 
 use crate::config::ServerConfig;
@@ -899,77 +899,126 @@ pub fn cmd_xread(
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
-    // 1) Basic usage check: "XREAD streams" + N keys + N start-IDs
-    if args.len() < 4
-        || args[1].to_lowercase() != "streams"
-        || (args.len() - 2) % 2 != 0
-    {
-        write_error(out, "usage: XREAD streams <key> [<key> ...] <id> [<id> ...]")?;
+    // 1) Parse optional BLOCK
+    let mut idx = 1;
+    let block_ms = if args.get(idx).map(|s| s.to_lowercase()) == Some("block".into()) {
+        let ms = args.get(idx+1)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        idx += 2;
+        Some(ms)
+    } else {
+        None
+    };
+
+    // 2) Next must be STREAMS
+    if args.get(idx).map(|s| s.to_lowercase()) != Some("streams".into()) {
+        write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
+        return Ok(());
+    }
+    idx += 1;
+
+    // 3) Determine number of streams (keys) == number of start-IDs
+    let rem = args.len() - idx;
+    if rem < 2 || rem % 2 != 0 {
+        write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
+        return Ok(());
+    }
+    let streams = rem / 2;
+    let keys   = &args[idx..idx+streams];
+    let starts = &args[idx+streams..];
+
+    // Helper to collect matching entries > start-ID
+    let collect = || {
+        let store = ctx.store.lock().unwrap();
+        let mut out = Vec::new();
+        for (key, start_raw) in keys.iter().zip(starts.iter()) {
+            // parse start
+            let (start_ms, start_seq) = if let Some(_) = start_raw.find('-') {
+                let mut p = start_raw.splitn(2, '-');
+                let ms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                let seq = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                (ms, seq)
+            } else {
+                let ms = start_raw.parse::<u64>().unwrap_or(0);
+                (ms, 0)
+            };
+
+            // fetch or type-error
+            let entries = match store.get(key) {
+                Some((Value::Stream(v), _)) => v.clone(),
+                Some(_) => {
+                    // WRONGTYPE
+                    out.clear();
+                    return Err(());
+                }
+                None => Vec::new(),
+            };
+
+            // filter
+            let filtered = entries.into_iter()
+                .filter(|e| {
+                    let mut p   = e.id.splitn(2, '-');
+                    let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    ems > start_ms || (ems == start_ms && eseq > start_seq)
+                })
+                .collect::<Vec<_>>();
+
+            if !filtered.is_empty() {
+                out.push((key.clone(), filtered));
+            }
+        }
+        Ok(out)
+    };
+
+    // 4) First try immediately
+    let mut results = match collect() {
+        Ok(r) => r,
+        Err(_) => { write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?; return Ok(()); }
+    };
+
+    // 5) If no data and blocking requested, poll until timeout
+    if results.is_empty() {
+        if let Some(ms) = block_ms {
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+                results = match collect() {
+                    Ok(r) => r,
+                    Err(_) => { write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?; return Ok(()); }
+                };
+                if !results.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 6) If still empty and we were blocking, return nil bulk string
+    if results.is_empty() && block_ms.is_some() {
+        out.write_all(b"$-1\r\n")?;
         return Ok(());
     }
 
-    // 2) Split into keys and their corresponding start-IDs
-    let streams = (args.len() - 2) / 2;
-    let keys = &args[2..2 + streams];
-    let starts = &args[2 + streams..];
-
-    // 3) Lock and clone or error
-    let store = ctx.store.lock().unwrap();
-
-    // Prepare per-stream results
-    let mut results = Vec::with_capacity(streams);
-    for (key, start_raw) in keys.iter().zip(starts.iter()) {
-        // 3a) Parse start ID (exclusive): either "ms-seq" or "ms"
-        let (start_ms, start_seq) = if let Some(_) = start_raw.find('-') {
-            let mut p = start_raw.splitn(2, '-');
-            let ms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
-            let seq = p.next().unwrap().parse::<u64>().unwrap_or(0);
-            (ms, seq)
-        } else {
-            let ms = start_raw.parse::<u64>().unwrap_or(0);
-            (ms, 0)
-        };
-
-        // 3b) Fetch entries or type error
-        let entries = match store.get(key) {
-            Some((Value::Stream(v), _)) => v.clone(),
-            Some(_) => {
-                write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
-                return Ok(());
-            }
-            None => Vec::new(),
-        };
-
-        // 3c) Filter for IDs > start
-        let filtered = entries.into_iter()
-            .filter(|e| {
-                let mut p   = e.id.splitn(2, '-');
-                let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                ems > start_ms || (ems == start_ms && eseq > start_seq)
-            })
-            .collect::<Vec<_>>();
-
-        results.push((key.clone(), filtered));
+    // 7) If empty and non-blocking, return empty array
+    if results.is_empty() {
+        out.write_all(b"*0\r\n")?;
+        return Ok(());
     }
-    drop(store);
 
-    // 4) Write outer array: one element per stream
+    // 8) Encode results as RESP multi-bulk
     write!(out, "*{}\r\n", results.len())?;
-
-    // 5) For each stream: [ key, [ entries... ] ]
     for (key, entries) in results {
         write!(out, "*2\r\n")?;
-        write_bulk_string(out, &key)?;              // stream name
-        write!(out, "*{}\r\n", entries.len())?;     // number of entries
-
-        // 6) Each entry: [ id, [ k, v, ... ] ]
-        for e in entries {
+        write_bulk_string(out, &key)?;
+        write!(out, "*{}\r\n", entries.len())?;
+        for entry in entries {
             write!(out, "*2\r\n")?;
-            write_bulk_string(out, &e.id)?;
-            let kvs = e.fields.len() * 2;
+            write_bulk_string(out, &entry.id)?;
+            let kvs = entry.fields.len() * 2;
             write!(out, "*{}\r\n", kvs)?;
-            for (k, v) in e.fields {
+            for (k, v) in entry.fields {
                 write_bulk_string(out, &k)?;
                 write_bulk_string(out, &v)?;
             }
