@@ -72,12 +72,7 @@ pub fn write_bulk_string(out: &mut dyn Write, data: &str) -> io::Result<()> {
 }
 
 /// Return `false` (and write an ERR) if `args.len() != expected`.
-pub fn check_len(
-    out: &mut dyn Write,
-    args: &[String],
-    expected: usize,
-    usage: &str,
-) -> bool {
+pub fn check_len(out: &mut dyn Write, args: &[String], expected: usize, usage: &str) -> bool {
     if args.len() != expected {
         let _ = write_error(out, usage);
         false

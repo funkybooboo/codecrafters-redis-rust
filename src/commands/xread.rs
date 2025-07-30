@@ -1,21 +1,18 @@
-use std::{io, thread};
-use std::io::Write;
-use std::net::TcpStream;
-use std::time::{Duration, Instant};
 use crate::commands::Context;
 use crate::rdb::{StreamEntry, Value};
 use crate::resp::{write_bulk_string, write_error};
+use std::io::Write;
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
+use std::{io, thread};
 
 /// XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]
-pub fn cmd_xread(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_xread(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     // 1) Parse optional BLOCK
     let mut idx = 1;
     let block_ms = if args.get(idx).map(|s| s.to_lowercase()) == Some("block".into()) {
-        let ms = args.get(idx + 1)
+        let ms = args
+            .get(idx + 1)
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         idx += 2;
@@ -26,7 +23,10 @@ pub fn cmd_xread(
 
     // 2) Expect STREAMS
     if args.get(idx).map(|s| s.to_lowercase()) != Some("streams".into()) {
-        write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
+        write_error(
+            out,
+            "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]",
+        )?;
         return Ok(());
     }
     idx += 1;
@@ -34,11 +34,14 @@ pub fn cmd_xread(
     // 3) Split keys vs starts
     let rem = args.len() - idx;
     if rem < 2 || rem % 2 != 0 {
-        write_error(out, "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]")?;
+        write_error(
+            out,
+            "usage: XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]",
+        )?;
         return Ok(());
     }
     let n_streams = rem / 2;
-    let keys   = &args[idx..idx + n_streams];
+    let keys = &args[idx..idx + n_streams];
     let starts = &args[idx + n_streams..];
 
     // 4) **Compute static start Positions** (ms,seq) for each stream **once**
@@ -50,7 +53,10 @@ pub fn cmd_xread(
             let entries = match store.get(key) {
                 Some((Value::Stream(v), _)) => v.clone(),
                 Some(_) => {
-                    write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                    write_error(
+                        out,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    )?;
                     return Ok(());
                 }
                 None => Vec::new(),
@@ -73,7 +79,7 @@ pub fn cmd_xread(
             } else if let Some(_) = start_raw.find('-') {
                 // explicit "ms-seq"
                 let mut p = start_raw.splitn(2, '-');
-                let ms  = p.next().unwrap().parse().unwrap_or(0);
+                let ms = p.next().unwrap().parse().unwrap_or(0);
                 let seq = p.next().unwrap().parse().unwrap_or(0);
                 (ms, seq)
             } else {
@@ -92,9 +98,7 @@ pub fn cmd_xread(
         let store = ctx.store.lock().unwrap();
         let mut out = Vec::with_capacity(n_streams);
 
-        for ((key), &(start_ms, start_seq)) in
-            keys.iter().zip(start_positions.iter())
-        {
+        for ((key), &(start_ms, start_seq)) in keys.iter().zip(start_positions.iter()) {
             // Fetch entries
             let entries = match store.get(key) {
                 Some((Value::Stream(v), _)) => v.clone(),
@@ -103,10 +107,11 @@ pub fn cmd_xread(
             };
 
             // Filter IDs strictly greater than (start_ms, start_seq)
-            let filtered = entries.into_iter()
+            let filtered = entries
+                .into_iter()
                 .filter(|e| {
-                    let mut p    = e.id.splitn(2, '-');
-                    let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    let mut p = e.id.splitn(2, '-');
+                    let ems = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                     let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                     ems > start_ms || (ems == start_ms && eseq > start_seq)
                 })
@@ -123,7 +128,10 @@ pub fn cmd_xread(
     let mut results = match collect() {
         Ok(r) => r,
         Err(_) => {
-            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+            write_error(
+                out,
+                "WRONGTYPE Operation against a key holding the wrong kind of value",
+            )?;
             return Ok(());
         }
     };
@@ -143,7 +151,10 @@ pub fn cmd_xread(
                     results = match collect() {
                         Ok(r) => r,
                         Err(_) => {
-                            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                            write_error(
+                                out,
+                                "WRONGTYPE Operation against a key holding the wrong kind of value",
+                            )?;
                             return Ok(());
                         }
                     };
@@ -160,7 +171,10 @@ pub fn cmd_xread(
                     results = match collect() {
                         Ok(r) => r,
                         Err(_) => {
-                            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                            write_error(
+                                out,
+                                "WRONGTYPE Operation against a key holding the wrong kind of value",
+                            )?;
                             return Ok(());
                         }
                     };

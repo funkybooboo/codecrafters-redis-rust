@@ -1,11 +1,11 @@
+use crate::commands::replay_cmd;
+use crate::config::ServerConfig;
+use crate::resp::read_array;
+use crate::resp::write_array;
+use crate::Context;
 use std::io;
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
-use crate::commands::set::cmd_set;
-use crate::config::ServerConfig;
-use crate::Context;
-use crate::resp::read_array;
-use crate::resp::write_array;
 
 /// Full replica handshake (parts 1–3):
 ///
@@ -27,7 +27,10 @@ pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<TcpStream> {
     let _ = wait_for_it(&mut master)?;
 
     // 2) Notify listening port
-    write_array(&mut master, &["REPLCONF", "listening-port", &cfg.port.to_string()])?;
+    write_array(
+        &mut master,
+        &["REPLCONF", "listening-port", &cfg.port.to_string()],
+    )?;
     // Wait for +OK
     let _ = wait_for_it(&mut master)?;
 
@@ -55,23 +58,17 @@ fn wait_for_it(stream: &mut TcpStream) -> io::Result<String> {
 
 /// Read commands from master, replay only write‐type ones through your normal cmd_*
 /// (which mutates ctx.store for you). Any “OK” they emit is ignored.
-pub fn replication_loop(
-    stream: TcpStream,
-    ctx: Context,
-) -> io::Result<()> {
+pub fn replication_loop(stream: TcpStream, ctx: Context) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
     while let Some(args) = read_array(&mut reader)? {
-        if args.is_empty() { continue; }
-        match args[0].to_uppercase().as_str() {
-            "SET" => {
-                // re‐use your regular cmd_set implementation
-                let _ = cmd_set(&mut writer, &args, &ctx);
-            }
-            // add other write‐type commands here…
-            _ => {}
+        if args.is_empty() {
+            continue;
         }
+        let cmd = args[0].to_uppercase();
+        // replay only write‐type commands:
+        replay_cmd(&cmd, &mut writer, &args, &ctx)?;
     }
 
     Ok(())

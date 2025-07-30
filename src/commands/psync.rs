@@ -1,26 +1,30 @@
-use std::io;
-use std::io::Write;
-use std::net::TcpStream;
 use crate::commands::Context;
 use crate::rdb::EMPTY_RDB;
 use crate::resp::{check_len, write_simple_string};
 use crate::role::Role;
+use std::io;
+use std::io::Write;
+use std::net::TcpStream;
 
 /// PSYNC <master_replid> <master_repl_offset>
 ///   → +FULLRESYNC <replid> 0\r\n
 ///   → $<len>\r\n<empty RDB bytes>
-pub fn cmd_psync(
-    stream: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_psync(stream: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     // 1) Validate args
-    if !check_len(stream, args, 3, "usage: PSYNC <master_replid> <master_repl_offset>") {
+    if !check_len(
+        stream,
+        args,
+        3,
+        "usage: PSYNC <master_replid> <master_repl_offset>",
+    ) {
         return Ok(());
     }
 
     // 2) Send "+FULLRESYNC <id> <offset>\r\n"
-    let full = format!("FULLRESYNC {} {}", ctx.cfg.master_replid, ctx.cfg.master_repl_offset);
+    let full = format!(
+        "FULLRESYNC {} {}",
+        ctx.cfg.master_replid, ctx.cfg.master_repl_offset
+    );
     write_simple_string(stream, &full)?;
 
     // 3) Send empty RDB: length header + bytes

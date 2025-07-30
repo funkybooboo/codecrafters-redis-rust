@@ -1,17 +1,13 @@
-use std::{io, thread};
+use crate::commands::Context;
+use crate::rdb::Value;
+use crate::resp::write_error;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::commands::Context;
-use crate::rdb::Value;
-use crate::resp::write_error;
+use std::{io, thread};
 
-pub fn cmd_blpop(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_blpop(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     if args.len() != 3 {
         write_error(out, "usage: BLPOP <key> <timeout>")?;
         return Ok(());
@@ -63,7 +59,9 @@ pub fn cmd_blpop(
             let mut blockers = blocking.lock().unwrap();
             if let Some(waiters) = blockers.get_mut(&key) {
                 if let Some(index) = client_addr.and_then(|addr| {
-                    waiters.iter().position(|s| s.peer_addr().ok() == Some(addr))
+                    waiters
+                        .iter()
+                        .position(|s| s.peer_addr().ok() == Some(addr))
                 }) {
                     if let Some(stream) = waiters.get_mut(index) {
                         let _ = stream.write_all(b"$-1\r\n");

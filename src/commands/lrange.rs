@@ -1,14 +1,10 @@
-use std::io::{self, Write};
-use std::net::TcpStream;
 use crate::commands::Context;
 use crate::rdb::Value;
 use crate::resp::{check_len, write_error};
+use std::io::{self, Write};
+use std::net::TcpStream;
 
-pub fn cmd_lrange(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_lrange(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     if !check_len(out, args, 4, "usage: LRANGE <key> <start> <stop>") {
         return Ok(());
     }
@@ -56,7 +52,10 @@ pub fn cmd_lrange(
             }
         }
         Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
-            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+            write_error(
+                out,
+                "WRONGTYPE Operation against a key holding the wrong kind of value",
+            )?;
         }
         None => {
             write!(out, "*0\r\n")?;

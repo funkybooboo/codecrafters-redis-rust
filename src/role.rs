@@ -13,7 +13,7 @@ impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::Master => "master",
-            Role::Slave  => "slave",
+            Role::Slave => "slave",
         }
     }
 }
@@ -29,8 +29,8 @@ impl FromStr for Role {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "master" => Ok(Role::Master),
-            "slave"  => Ok(Role::Slave),
-            other    => Err(format!("invalid role: {}", other)),
+            "slave" => Ok(Role::Slave),
+            other => Err(format!("invalid role: {}", other)),
         }
     }
 }

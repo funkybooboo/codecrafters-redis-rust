@@ -1,14 +1,10 @@
-use std::io::{self, Write};
-use std::net::TcpStream;
 use crate::commands::Context;
 use crate::rdb::Value;
 use crate::resp::write_error;
+use std::io::{self, Write};
+use std::net::TcpStream;
 
-pub fn cmd_lpop(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_lpop(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     if args.len() != 2 && args.len() != 3 {
         write_error(out, "usage: LPOP <key> [count]")?;
         return Ok(());
@@ -33,8 +29,8 @@ pub fn cmd_lpop(
         Some((Value::List(ref mut list), _)) => {
             if list.is_empty() {
                 match count {
-                    Some(_) => write!(out, "*0\r\n")?,     // empty array
-                    None    => write!(out, "$-1\r\n")?,     // null bulk string
+                    Some(_) => write!(out, "*0\r\n")?, // empty array
+                    None => write!(out, "$-1\r\n")?,   // null bulk string
                 }
                 return Ok(());
             }
@@ -59,14 +55,15 @@ pub fn cmd_lpop(
             }
         }
         Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
-            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+            write_error(
+                out,
+                "WRONGTYPE Operation against a key holding the wrong kind of value",
+            )?;
         }
-        None => {
-            match count {
-                Some(_) => write!(out, "*0\r\n")?,
-                None    => write!(out, "$-1\r\n")?,
-            }
-        }
+        None => match count {
+            Some(_) => write!(out, "*0\r\n")?,
+            None => write!(out, "$-1\r\n")?,
+        },
     }
 
     Ok(())

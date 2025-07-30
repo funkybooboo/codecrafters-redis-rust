@@ -1,15 +1,11 @@
-use std::io;
-use std::net::TcpStream;
-use std::time::SystemTime;
 use crate::commands::Context;
 use crate::rdb::Value;
 use crate::resp::{check_len, write_simple_string};
+use std::io;
+use std::net::TcpStream;
+use std::time::SystemTime;
 
-pub fn cmd_type(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_type(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: TYPE <key>") {
         return Ok(());
     }

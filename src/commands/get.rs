@@ -1,17 +1,13 @@
+use crate::commands::Context;
+use crate::rdb::Value;
+use crate::resp::{check_len, write_bulk_string, write_error};
 use std::io;
 use std::io::Write;
 use std::net::TcpStream;
 use std::time::SystemTime;
-use crate::commands::Context;
-use crate::rdb::Value;
-use crate::resp::{check_len, write_bulk_string, write_error};
 
 /// GET key -> BulkString or NullBulk
-pub fn cmd_get(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_get(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: GET <key>") {
         return Ok(());
     }
@@ -27,7 +23,10 @@ pub fn cmd_get(
         }
         match val {
             Value::String(s) => write_bulk_string(out, &s),
-            _ => write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value"),
+            _ => write_error(
+                out,
+                "WRONGTYPE Operation against a key holding the wrong kind of value",
+            ),
         }
     } else {
         out.write_all(b"$-1\r\n")

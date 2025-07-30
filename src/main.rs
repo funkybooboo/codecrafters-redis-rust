@@ -1,14 +1,11 @@
-mod config;
-mod resp;
-mod rdb;
-mod server;
-mod role;
 mod commands;
+mod config;
+mod rdb;
 mod replication;
+mod resp;
+mod role;
+mod server;
 
-use std::{io, net::TcpListener, sync::{Arc, Mutex}};
-use std::collections::HashMap;
-use std::net::TcpStream;
 use crate::{
     config::{parse_config, ServerConfig},
     rdb::{load_rdb_snapshot, Store},
@@ -16,13 +13,20 @@ use crate::{
     role::Role,
     server::handle_client,
 };
+use std::collections::HashMap;
+use std::net::TcpStream;
+use std::{
+    io,
+    net::TcpListener,
+    sync::{Arc, Mutex},
+};
 
 pub type BlockingList = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
 
 #[derive(Clone)]
 pub struct Context {
-    pub cfg:      Arc<ServerConfig>,        // now Arc, not &
-    pub store:    Arc<Store>,               // now Arc<Mutex<…>>
+    pub cfg: Arc<ServerConfig>, // now Arc, not &
+    pub store: Arc<Store>,      // now Arc<Mutex<…>>
     pub replicas: Arc<Mutex<Vec<TcpStream>>>,
     pub blocking: BlockingList,
 }
@@ -39,10 +43,10 @@ fn main() -> io::Result<()> {
 
     // build a single Context
     let ctx = Context {
-        cfg:       cfg.clone(),
-        store:     store.clone(),
-        replicas:  replicas.clone(),
-        blocking:  blocking_clients.clone(),
+        cfg: cfg.clone(),
+        store: store.clone(),
+        replicas: replicas.clone(),
+        blocking: blocking_clients.clone(),
     };
 
     // If this node is a slave, spin up replication_loop

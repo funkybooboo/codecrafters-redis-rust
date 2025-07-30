@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::{
     collections::HashMap,
     fs::File,
@@ -5,7 +6,6 @@ use std::{
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct StreamEntry {
@@ -143,10 +143,7 @@ fn read_entries<R: BufRead>(
     Ok(map)
 }
 
-fn read_expiry_prefix<R: BufRead>(
-    rdr: &mut R,
-    prefix_byte: u8,
-) -> io::Result<Option<SystemTime>> {
+fn read_expiry_prefix<R: BufRead>(rdr: &mut R, prefix_byte: u8) -> io::Result<Option<SystemTime>> {
     if prefix_byte == 0xFD {
         rdr.consume(1);
         let mut secs = [0u8; 4];
@@ -208,7 +205,10 @@ fn read_size<R: BufRead>(rdr: &mut R) -> io::Result<usize> {
 fn read_string<R: BufRead>(rdr: &mut R) -> io::Result<String> {
     let buf = rdr.fill_buf()?;
     if buf.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF on string"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "EOF on string",
+        ));
     }
     let b0 = buf[0];
     let tag = b0 >> 6;

@@ -1,16 +1,12 @@
-use std::io::{self, Write};
-use std::net::TcpStream;
 use crate::commands::Context;
 use crate::rdb::Value;
 use crate::resp::write_error;
+use std::io::{self, Write};
+use std::net::TcpStream;
 
 /// INCR <key>
 /// (Stage 1: only supports keys that already exist with numeric String values)
-pub fn cmd_incr(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_incr(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     // 1) Validate args
     if args.len() != 2 {
         write_error(out, "usage: INCR <key>")?;

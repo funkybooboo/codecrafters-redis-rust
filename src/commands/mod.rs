@@ -1,54 +1,93 @@
+mod blpop;
+mod config;
+mod echo;
+mod get;
+mod incr;
+mod info;
 mod keys;
-mod replconf;
-mod psync;
-mod rpush;
-mod lrange;
-mod lpush;
 mod llen;
 mod lpop;
-mod blpop;
+mod lpush;
+mod lrange;
+mod ping;
+mod psync;
+mod replconf;
+mod rpush;
+mod set;
 mod typee;
 mod xadd;
 mod xrange;
 mod xread;
-mod incr;
-mod ping;
-mod echo;
-pub mod set;
-mod get;
-mod config;
-mod info;
 
-use std::collections::HashMap;
-use std::io;
-use std::net::TcpStream;
+use lazy_static::lazy_static;
+use std::{collections::HashMap, io, net::TcpStream};
 
+use crate::resp::write_error;
 use crate::Context;
-use crate::commands::blpop::cmd_blpop;
-use crate::commands::echo::cmd_echo;
-use crate::commands::ping::cmd_ping;
-use crate::commands::set::cmd_set;
-use crate::commands::config::cmd_config;
-use crate::commands::get::cmd_get;
-use crate::commands::incr::cmd_incr;
-use crate::commands::info::cmd_info;
-use crate::commands::keys::cmd_keys;
-use crate::commands::llen::cmd_llen;
-use crate::commands::lpop::cmd_lpop;
-use crate::commands::lpush::cmd_lpush;
-use crate::commands::lrange::cmd_lrange;
-use crate::commands::psync::cmd_psync;
-use crate::commands::replconf::cmd_replconf;
-use crate::commands::rpush::cmd_rpush;
-use crate::commands::typee::cmd_type;
-use crate::commands::xadd::cmd_xadd;
-use crate::commands::xrange::cmd_xrange;
-use crate::commands::xread::cmd_xread;
+
+// bring in each cmd_xxx
+use self::blpop::cmd_blpop;
+use self::config::cmd_config;
+use self::echo::cmd_echo;
+use self::get::cmd_get;
+use self::incr::cmd_incr;
+use self::info::cmd_info;
+use self::keys::cmd_keys;
+use self::llen::cmd_llen;
+use self::lpop::cmd_lpop;
+use self::lpush::cmd_lpush;
+use self::lrange::cmd_lrange;
+use self::ping::cmd_ping;
+use self::psync::cmd_psync;
+use self::replconf::cmd_replconf;
+use self::rpush::cmd_rpush;
+use self::set::cmd_set;
+use self::typee::cmd_type;
+use self::xadd::cmd_xadd;
+use self::xrange::cmd_xrange;
+use self::xread::cmd_xread;
 
 /// Every command has this signature
-pub type CmdFn = fn(stream: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()>;
+pub type CmdFn = fn(&mut TcpStream, &[String], &Context) -> io::Result<()>;
 
-// helper to know which commands should be fanned out
+lazy_static! {
+    /// Full map of *all* commands
+    static ref ALL_CMDS: HashMap<String, CmdFn> = {
+        let mut m = HashMap::new();
+        m.insert("PING".into(),    cmd_ping   as CmdFn);
+        m.insert("ECHO".into(),    cmd_echo   as CmdFn);
+        m.insert("SET".into(),     cmd_set    as CmdFn);
+        m.insert("GET".into(),     cmd_get    as CmdFn);
+        m.insert("CONFIG".into(),  cmd_config as CmdFn);
+        m.insert("KEYS".into(),    cmd_keys   as CmdFn);
+        m.insert("INFO".into(),    cmd_info   as CmdFn);
+        m.insert("REPLCONF".into(), cmd_replconf as CmdFn);
+        m.insert("PSYNC".into(),   cmd_psync  as CmdFn);
+        m.insert("RPUSH".into(),   cmd_rpush  as CmdFn);
+        m.insert("LRANGE".into(),  cmd_lrange as CmdFn);
+        m.insert("LPUSH".into(),   cmd_lpush  as CmdFn);
+        m.insert("LLEN".into(),    cmd_llen   as CmdFn);
+        m.insert("LPOP".into(),    cmd_lpop   as CmdFn);
+        m.insert("BLPOP".into(),   cmd_blpop  as CmdFn);
+        m.insert("TYPE".into(),    cmd_type   as CmdFn);
+        m.insert("XADD".into(),    cmd_xadd   as CmdFn);
+        m.insert("XRANGE".into(),  cmd_xrange as CmdFn);
+        m.insert("XREAD".into(),   cmd_xread  as CmdFn);
+        m.insert("INCR".into(),    cmd_incr   as CmdFn);
+        m
+    };
+
+    /// Pre‐filtered map of only the write‐type commands
+    static ref WRITE_CMDS: HashMap<String, CmdFn> = {
+        ALL_CMDS
+            .iter()
+            .filter(|(name, _)| is_write_cmd(name))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    };
+}
+
+/// Which commands actually mutate state
 pub fn is_write_cmd(cmd: &str) -> bool {
     matches!(
         cmd,
@@ -58,31 +97,36 @@ pub fn is_write_cmd(cmd: &str) -> bool {
       | "LPUSH" // prepend to list
       | "LPOP"  // pop from head of list
       | "INCR"  // increment a numeric string
-      | "XADD"  // append to a stream
+      | "XADD" // append to a stream
     )
 }
 
-pub fn make_registry() -> HashMap<String, CmdFn> {
-    let mut m = HashMap::new();
-    m.insert("PING".into(),    cmd_ping   as CmdFn);    // respond with “PONG”
-    m.insert("ECHO".into(),    cmd_echo   as CmdFn);    // send back whatever message you give
-    m.insert("SET".into(),     cmd_set    as CmdFn);    // set a key to a value (optional expiry)
-    m.insert("GET".into(),     cmd_get    as CmdFn);    // retrieve the value of a key
-    m.insert("CONFIG".into(),  cmd_config as CmdFn);    // get a server configuration setting
-    m.insert("KEYS".into(),    cmd_keys   as CmdFn);    // list all keys matching “*”
-    m.insert("INFO".into(),    cmd_info   as CmdFn);    // show replication status info
-    m.insert("REPLCONF".into(), cmd_replconf as CmdFn); // accept replication configuration from replica
-    m.insert("PSYNC".into(),   cmd_psync  as CmdFn);    // perform partial resynchronization for replicas
-    m.insert("RPUSH".into(),   cmd_rpush  as CmdFn);    // add one or more elements to the end of a list
-    m.insert("LRANGE".into(),  cmd_lrange as CmdFn);    // return a slice of elements from a list
-    m.insert("LPUSH".into(),   cmd_lpush  as CmdFn);    // add one or more elements to the front of a list
-    m.insert("LLEN".into(),    cmd_llen   as CmdFn);    // get the number of elements in a list
-    m.insert("LPOP".into(),    cmd_lpop   as CmdFn);    // remove and return element(s) from the front of a list
-    m.insert("BLPOP".into(),   cmd_blpop  as CmdFn);    // block until an element is available, then pop from list
-    m.insert("TYPE".into(),    cmd_type   as CmdFn);    // report the data type stored at a key
-    m.insert("XADD".into(),    cmd_xadd   as CmdFn);    // append a new entry to a stream
-    m.insert("XRANGE".into(),  cmd_xrange as CmdFn);    // read a range of entries from a stream
-    m.insert("XREAD".into(),   cmd_xread  as CmdFn);    // read new stream entries, optionally waiting for them
-    m.insert("INCR".into(),    cmd_incr   as CmdFn);    // increment the integer value of a key by one
-    m
+/// Dispatch any command (used by your normal server loop).
+/// Emits “unknown command” on unrecognized names.
+pub fn dispatch_cmd(
+    name: &str,
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if let Some(cmd_fn) = ALL_CMDS.get(name) {
+        cmd_fn(out, args, ctx)
+    } else {
+        write_error(out, "unknown command")?;
+        Ok(())
+    }
+}
+
+/// Replay only write‐type commands (used by replication).
+/// Silently ignores everything else.
+pub fn replay_cmd(
+    name: &str,
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if let Some(cmd_fn) = WRITE_CMDS.get(name) {
+        let _ = cmd_fn(out, args, ctx);
+    }
+    Ok(())
 }

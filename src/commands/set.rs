@@ -6,11 +6,7 @@ use std::net::TcpStream;
 use std::time::{Duration, SystemTime};
 
 /// SET <key> <value> [PX ms] → OK or error
-pub fn cmd_set(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_set(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     // validate argument count
     if args.len() != 3 && args.len() != 5 {
         write_error(out, "usage: SET <key> <val> [PX ms]")?;
