@@ -899,70 +899,80 @@ pub fn cmd_xread(
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
-    // 1) Usage check
-    if args.len() != 4 || args[1].to_lowercase() != "streams" {
-        write_error(out, "usage: XREAD streams <key> <start-id>")?;
+    // 1) Basic usage check: "XREAD streams" + N keys + N start-IDs
+    if args.len() < 4
+        || args[1].to_lowercase() != "streams"
+        || (args.len() - 2) % 2 != 0
+    {
+        write_error(out, "usage: XREAD streams <key> [<key> ...] <id> [<id> ...]")?;
         return Ok(());
     }
-    let key      = &args[2];
-    let start_raw = &args[3];
 
-    // 2) Fetch & clone the stream entries
-    let entries: Vec<StreamEntry> = {
-        let map = ctx.store.lock().unwrap();
-        match map.get(key) {
-            None => {
-                // No such stream => empty result (still wrap in one-stream array)
-                write!(out, "*0\r\n")?;
-                return Ok(());
-            }
+    // 2) Split into keys and their corresponding start-IDs
+    let streams = (args.len() - 2) / 2;
+    let keys = &args[2..2 + streams];
+    let starts = &args[2 + streams..];
+
+    // 3) Lock and clone or error
+    let store = ctx.store.lock().unwrap();
+
+    // Prepare per-stream results
+    let mut results = Vec::with_capacity(streams);
+    for (key, start_raw) in keys.iter().zip(starts.iter()) {
+        // 3a) Parse start ID (exclusive): either "ms-seq" or "ms"
+        let (start_ms, start_seq) = if let Some(_) = start_raw.find('-') {
+            let mut p = start_raw.splitn(2, '-');
+            let ms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
+            let seq = p.next().unwrap().parse::<u64>().unwrap_or(0);
+            (ms, seq)
+        } else {
+            let ms = start_raw.parse::<u64>().unwrap_or(0);
+            (ms, 0)
+        };
+
+        // 3b) Fetch entries or type error
+        let entries = match store.get(key) {
             Some((Value::Stream(v), _)) => v.clone(),
             Some(_) => {
                 write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
                 return Ok(());
             }
-        }
-    };
+            None => Vec::new(),
+        };
 
-    // 3) Parse the start ID (exclusive)
-    let (start_ms, start_seq) = if let Some(pos) = start_raw.find('-') {
-        let mut parts = start_raw.splitn(2, '-');
-        let ms  = parts.next().unwrap().parse::<u64>().unwrap_or(0);
-        let seq = parts.next().unwrap().parse::<u64>().unwrap_or(0);
-        (ms, seq)
-    } else {
-        let ms = start_raw.parse::<u64>().unwrap_or(0);
-        (ms, 0)
-    };
+        // 3c) Filter for IDs > start
+        let filtered = entries.into_iter()
+            .filter(|e| {
+                let mut p   = e.id.splitn(2, '-');
+                let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                ems > start_ms || (ems == start_ms && eseq > start_seq)
+            })
+            .collect::<Vec<_>>();
 
-    // 4) Filter entries with ID > start
-    let filtered: Vec<StreamEntry> = entries.into_iter()
-        .filter(|e| {
-            let mut p   = e.id.splitn(2, '-');
-            let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            ems > start_ms || (ems == start_ms && eseq > start_seq)
-        })
-        .collect();
+        results.push((key.clone(), filtered));
+    }
+    drop(store);
 
-    // 5) RESP-encode: one element per stream
-    // Outer array: number of streams (always 1 here)
-    write!(out, "*1\r\n")?;
-    // Inner: [ key, entries-array ]
-    write!(out, "*2\r\n")?;
-    // 5a) stream name
-    write_bulk_string(out, key)?;
-    // 5b) entries list
-    write!(out, "*{}\r\n", filtered.len())?;
-    for entry in filtered {
-        // each entry is [ id, [k,v,k,v,…] ]
+    // 4) Write outer array: one element per stream
+    write!(out, "*{}\r\n", results.len())?;
+
+    // 5) For each stream: [ key, [ entries... ] ]
+    for (key, entries) in results {
         write!(out, "*2\r\n")?;
-        write_bulk_string(out, &entry.id)?;
-        let kvs = entry.fields.len() * 2;
-        write!(out, "*{}\r\n", kvs)?;
-        for (k, v) in entry.fields {
-            write_bulk_string(out, &k)?;
-            write_bulk_string(out, &v)?;
+        write_bulk_string(out, &key)?;              // stream name
+        write!(out, "*{}\r\n", entries.len())?;     // number of entries
+
+        // 6) Each entry: [ id, [ k, v, ... ] ]
+        for e in entries {
+            write!(out, "*2\r\n")?;
+            write_bulk_string(out, &e.id)?;
+            let kvs = e.fields.len() * 2;
+            write!(out, "*{}\r\n", kvs)?;
+            for (k, v) in e.fields {
+                write_bulk_string(out, &k)?;
+                write_bulk_string(out, &v)?;
+            }
         }
     }
 
