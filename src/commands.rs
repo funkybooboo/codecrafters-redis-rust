@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+use std::thread;
 
 use crate::config::ServerConfig;
 use crate::resp::{
@@ -526,17 +527,18 @@ pub fn cmd_blpop(
         return Ok(());
     }
 
-    let key = &args[1];
-    let timeout = &args[2];
+    let key = args[1].clone();
+    let timeout_secs: f64 = match args[2].parse() {
+        Ok(t) => t,
+        Err(_) => {
+            write_error(out, "ERR timeout must be a float")?;
+            return Ok(());
+        }
+    };
 
-    if timeout != "0" {
-        write_error(out, "only timeout=0 supported for now")?;
-        return Ok(());
-    }
-
-    // Try immediate pop first
+    // Try immediate pop
     let mut store = ctx.store.lock().unwrap();
-    if let Some((Value::List(ref mut list), _)) = store.get_mut(key) {
+    if let Some((Value::List(ref mut list), _)) = store.get_mut(&key) {
         if !list.is_empty() {
             let val = list.remove(0);
             write!(
@@ -550,10 +552,41 @@ pub fn cmd_blpop(
             return Ok(());
         }
     }
-    drop(store); // release before blocking
+    drop(store);
 
-    // Block the client until RPUSH unblocks them
+    // Prepare blocking
+    let cloned_stream = out.try_clone()?;
+    let client_addr = cloned_stream.peer_addr().ok(); // 🧠 get SocketAddr before move
+
     let mut blockers = ctx.blocking.lock().unwrap();
-    blockers.entry(key.clone()).or_default().push(out.try_clone()?);
+    blockers.entry(key.clone()).or_default().push(cloned_stream);
+    drop(blockers);
+
+    // Timeout handler
+    if timeout_secs > 0.0 {
+        let key = key.clone();
+        let blocking = Arc::clone(&ctx.blocking);
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs_f64(timeout_secs));
+
+            let mut blockers = blocking.lock().unwrap();
+            if let Some(waiters) = blockers.get_mut(&key) {
+                if let Some(index) = client_addr.and_then(|addr| {
+                    waiters.iter().position(|s| s.peer_addr().ok() == Some(addr))
+                }) {
+                    if let Some(stream) = waiters.get_mut(index) {
+                        let _ = stream.write_all(b"$-1\r\n");
+                    }
+                    waiters.remove(index);
+                }
+
+                if waiters.is_empty() {
+                    blockers.remove(&key);
+                }
+            }
+        });
+    }
+
     Ok(())
 }
