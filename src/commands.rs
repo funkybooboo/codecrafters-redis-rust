@@ -50,6 +50,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("TYPE".into(), cmd_type as CmdFn);
     m.insert("XADD".into(), cmd_xadd as CmdFn);
     m.insert("XRANGE".into(), cmd_xrange as CmdFn);
+    m.insert("XREAD".into(), cmd_xread as CmdFn);
     m
 }
 
@@ -880,6 +881,81 @@ pub fn cmd_xrange(
     write!(out, "*{}\r\n", filtered.len())?;
     for entry in filtered {
         // [ ID , [k,v,k,v,…] ]
+        write!(out, "*2\r\n")?;
+        write_bulk_string(out, &entry.id)?;
+        let kvs = entry.fields.len() * 2;
+        write!(out, "*{}\r\n", kvs)?;
+        for (k, v) in entry.fields {
+            write_bulk_string(out, &k)?;
+            write_bulk_string(out, &v)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn cmd_xread(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    // 1) Usage check
+    if args.len() != 4 || args[1].to_lowercase() != "streams" {
+        write_error(out, "usage: XREAD streams <key> <start-id>")?;
+        return Ok(());
+    }
+    let key      = &args[2];
+    let start_raw = &args[3];
+
+    // 2) Fetch & clone the stream entries
+    let entries: Vec<StreamEntry> = {
+        let map = ctx.store.lock().unwrap();
+        match map.get(key) {
+            None => {
+                // No such stream => empty result (still wrap in one-stream array)
+                write!(out, "*0\r\n")?;
+                return Ok(());
+            }
+            Some((Value::Stream(v), _)) => v.clone(),
+            Some(_) => {
+                write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+                return Ok(());
+            }
+        }
+    };
+
+    // 3) Parse the start ID (exclusive)
+    let (start_ms, start_seq) = if let Some(pos) = start_raw.find('-') {
+        let mut parts = start_raw.splitn(2, '-');
+        let ms  = parts.next().unwrap().parse::<u64>().unwrap_or(0);
+        let seq = parts.next().unwrap().parse::<u64>().unwrap_or(0);
+        (ms, seq)
+    } else {
+        let ms = start_raw.parse::<u64>().unwrap_or(0);
+        (ms, 0)
+    };
+
+    // 4) Filter entries with ID > start
+    let filtered: Vec<StreamEntry> = entries.into_iter()
+        .filter(|e| {
+            let mut p   = e.id.splitn(2, '-');
+            let ems  = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let eseq = p.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            ems > start_ms || (ems == start_ms && eseq > start_seq)
+        })
+        .collect();
+
+    // 5) RESP-encode: one element per stream
+    // Outer array: number of streams (always 1 here)
+    write!(out, "*1\r\n")?;
+    // Inner: [ key, entries-array ]
+    write!(out, "*2\r\n")?;
+    // 5a) stream name
+    write_bulk_string(out, key)?;
+    // 5b) entries list
+    write!(out, "*{}\r\n", filtered.len())?;
+    for entry in filtered {
+        // each entry is [ id, [k,v,k,v,…] ]
         write!(out, "*2\r\n")?;
         write_bulk_string(out, &entry.id)?;
         let kvs = entry.fields.len() * 2;
