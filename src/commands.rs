@@ -640,31 +640,64 @@ pub fn cmd_xadd(
         return Ok(());
     }
 
-    let key = &args[1];
-    let id = args[2].clone();
+    let key    = &args[1];
+    let id_str = &args[2];
 
+    // parse "<ms>-<seq>"
+    let mut parts = id_str.splitn(2, '-');
+    let ms  = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let seq = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    // find last entry ID, defaulting to (0,0)
+    let (last_ms, last_seq) = {
+        let map = ctx.store.lock().unwrap();
+        if let Some((Value::Stream(entries), _)) = map.get(key) {
+            if let Some(last) = entries.last() {
+                let mut p = last.id.splitn(2, '-');
+                let lms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                let lseq = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                (lms, lseq)
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        }
+    };
+
+    // reject if new ID ≤ last ID, with a special case for 0-0
+    let is_minimum = ms == 0 && seq == 0;
+    if ms < last_ms || (ms == last_ms && seq <= last_seq) {
+        if is_minimum {
+            write_error(out, "The ID specified in XADD must be greater than 0-0")?;
+        } else {
+            write_error(out, "The ID specified in XADD is equal or smaller than the target stream top item")?;
+        }
+        return Ok(());
+    }
+
+    // build fields and insert...
     let fields: Vec<(String, String)> = args[3..]
         .chunks(2)
-        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+        .map(|c| (c[0].clone(), c[1].clone()))
         .collect();
 
-    let mut store = ctx.store.lock().unwrap();
-
-    match store.get_mut(key) {
+    let mut store_map = ctx.store.lock().unwrap();
+    match store_map.get_mut(key) {
         Some((Value::Stream(ref mut entries), _)) => {
-            entries.push(StreamEntry { id: id.clone(), fields });
+            entries.push(StreamEntry { id: id_str.clone(), fields });
         }
-        Some((_, _)) => {
+        Some(_) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
             return Ok(());
         }
         None => {
-            store.insert(
+            store_map.insert(
                 key.clone(),
-                (Value::Stream(vec![StreamEntry { id: id.clone(), fields }]), None),
+                (Value::Stream(vec![StreamEntry { id: id_str.clone(), fields }]), None),
             );
         }
     }
 
-    write_bulk_string(out, &id)
+    write_bulk_string(out, id_str)
 }
