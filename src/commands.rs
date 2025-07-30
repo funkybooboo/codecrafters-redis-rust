@@ -47,6 +47,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("LLEN".into(), cmd_llen as CmdFn);
     m.insert("LPOP".into(), cmd_lpop as CmdFn);
     m.insert("BLPOP".into(), cmd_blpop as CmdFn);
+    m.insert("TYPE".into(), cmd_type as CmdFn);
     m
 }
 
@@ -589,4 +590,42 @@ pub fn cmd_blpop(
     }
 
     Ok(())
+}
+
+pub fn cmd_type(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 2, "usage: TYPE <key>") {
+        return Ok(());
+    }
+
+    let key = &args[1];
+    let map = ctx.store.lock().unwrap();
+
+    let response = match map.get(key) {
+        Some((val, opt_expiry)) => {
+            if let Some(exp) = opt_expiry {
+                if SystemTime::now() >= *exp {
+                    "none"
+                } else {
+                    match val {
+                        Value::String(_) => "string",
+                        Value::List(_) => "list",
+                        // others to be added later
+                    }
+                }
+            } else {
+                match val {
+                    Value::String(_) => "string",
+                    Value::List(_) => "list",
+                    // others to be added later
+                }
+            }
+        }
+        None => "none",
+    };
+
+    write_simple_string(out, response)
 }
