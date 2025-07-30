@@ -7,7 +7,13 @@ use std::{
 };
 use std::sync::Mutex;
 
-pub(crate) type Store = Mutex<HashMap<String, (String, Option<SystemTime>)>>;
+#[derive(Debug, Clone)]
+pub enum Value {
+    String(String),
+    List(Vec<String>),
+}
+
+pub(crate) type Store = Mutex<HashMap<String, (Value, Option<SystemTime>)>>;
 
 /// The exact 88-byte “empty” RDB file (hex decoded from the codecrafters asset).
 pub(crate) const EMPTY_RDB: &[u8] = b"\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x09\x72\x65\
@@ -20,7 +26,7 @@ pub(crate) const EMPTY_RDB: &[u8] = b"\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x
 /// Load *all* key/value pairs and their optional expiry from the RDB file.
 pub fn load_rdb_snapshot<P: AsRef<Path>>(
     path: P,
-) -> io::Result<HashMap<String, (String, Option<SystemTime>)>> {
+) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
     let file = match File::open(&path) {
         Ok(f) => f,
         Err(ref e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -88,7 +94,7 @@ fn skip_hash_table_sizes<R: BufRead>(rdr: &mut R) -> io::Result<()> {
 
 fn read_entries<R: BufRead>(
     rdr: &mut R,
-) -> io::Result<HashMap<String, (String, Option<SystemTime>)>> {
+) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
     let mut map = HashMap::new();
 
     loop {
@@ -124,7 +130,7 @@ fn read_entries<R: BufRead>(
         // 5) Key + Value
         let key = read_string(rdr)?;
         let val = read_string(rdr)?;
-        map.insert(key, (val, expiry));
+        map.insert(key, (Value::String(val), expiry));
     }
 
     Ok(map)

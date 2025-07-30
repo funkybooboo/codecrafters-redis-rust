@@ -8,7 +8,7 @@ use crate::config::ServerConfig;
 use crate::resp::{
     write_simple_string, write_error, write_bulk_string, check_len,
 };
-use crate::rdb::{Store, EMPTY_RDB};
+use crate::rdb::{Store, Value, EMPTY_RDB};
 use crate::role::Role;
 
 /// A little context bundling everything cmds might need
@@ -23,7 +23,7 @@ pub type CmdFn = fn(stream: &mut TcpStream, args: &[String], ctx: &Context) -> i
 
 // helper to know which commands should be fanned out
 pub fn is_write_cmd(cmd: &str) -> bool {
-    matches!(cmd, "SET" | "DEL")
+    matches!(cmd, "SET" | "DEL" | "RPUSH")
 }
 
 /// Build the command registry once
@@ -38,6 +38,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("INFO".into(), cmd_info as CmdFn);
     m.insert("REPLCONF".into(), cmd_replconf as CmdFn);
     m.insert("PSYNC".into(), cmd_psync as CmdFn);
+    m.insert("RPUSH".into(), cmd_rpush as CmdFn);
     m
 }
 
@@ -97,7 +98,7 @@ pub fn apply_set(
     let mut map = store.lock().unwrap();
 
     if args.len() == 3 {
-        map.insert(key.clone(), (val.clone(), None));
+        map.insert(key.clone(), (Value::String(val.clone()), None));
     } else {
         // args == 5
         let ms = args[4].parse::<u64>().map_err(|_| {
@@ -106,7 +107,7 @@ pub fn apply_set(
         let expiry = SystemTime::now()
             .checked_add(Duration::from_millis(ms))
             .unwrap();
-        map.insert(key.clone(), (val.clone(), Some(expiry)));
+        map.insert(key.clone(), (Value::String(val.clone()), Some(expiry)));
     }
 
     Ok(())
@@ -131,7 +132,10 @@ pub fn cmd_get(
                 return out.write_all(b"$-1\r\n");
             }
         }
-        write_bulk_string(out, &val)
+        match val {
+            Value::String(s) => write_bulk_string(out, &s),
+            _ => write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value"),
+        }
     } else {
         out.write_all(b"$-1\r\n")
     }
@@ -158,7 +162,7 @@ pub fn cmd_config(
     };
 
     // array of two bulk-strings
-    out.write_all(format!("*2\r\n").as_bytes())?;
+    out.write_all("*2\r\n".to_string().as_bytes())?;
     write_bulk_string(out, key)?;
     write_bulk_string(out, val)
 }
@@ -248,6 +252,37 @@ pub fn cmd_psync(
         let mut reps = ctx.replicas.lock().unwrap();
         // clone the connection so future SETs can fan out here
         reps.push(stream.try_clone()?);
+    }
+
+    Ok(())
+}
+
+pub fn cmd_rpush(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if !check_len(out, args, 3, "usage: RPUSH <key> <value>") {
+        return Ok(());
+    }
+
+    let key = &args[1];
+    let val = args[2].clone();
+    let mut store = ctx.store.lock().unwrap();
+
+    match store.get_mut(key) {
+        Some((Value::List(ref mut list), _)) => {
+            list.push(val);
+            let len = list.len();
+            write!(out, ":{}\r\n", len)?;
+        }
+        Some((Value::String(_), _)) => {
+            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+        }
+        None => {
+            store.insert(key.clone(), (Value::List(vec![val]), None));
+            write!(out, ":1\r\n")?;
+        }
     }
 
     Ok(())
