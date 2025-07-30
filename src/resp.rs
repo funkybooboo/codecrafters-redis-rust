@@ -58,12 +58,12 @@ pub fn write_array(out: &mut dyn Write, items: &[&str]) -> io::Result<()> {
 
 /// +<string>\r\n
 pub fn write_simple_string(out: &mut dyn Write, s: &str) -> io::Result<()> {
-    write!(out, "+{}\r\n", s)
+    write!(out, "+{s}\r\n")
 }
 
 /// -ERR <msg>\r\n
 pub fn write_error(out: &mut dyn Write, msg: &str) -> io::Result<()> {
-    write!(out, "-ERR {}\r\n", msg)
+    write!(out, "-ERR {msg}\r\n")
 }
 
 /// $<len>\r\n<data>\r\n

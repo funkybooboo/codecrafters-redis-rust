@@ -26,7 +26,7 @@ pub fn cmd_incr(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Resu
                     // store back as a String
                     *s = new.to_string();
                     // integer reply
-                    write!(out, ":{}\r\n", new)?;
+                    write!(out, ":{new}\r\n")?;
                 }
                 Err(_) => {
                     // later stages will handle non-numeric

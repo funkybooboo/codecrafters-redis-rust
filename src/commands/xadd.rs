@@ -51,7 +51,7 @@ pub fn cmd_xadd(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Resu
         };
 
         let seq = max_seq.map(|n| n + 1).unwrap_or(0);
-        (ms, seq, format!("{}-{}", ms, seq))
+        (ms, seq, format!("{ms}-{seq}"))
     } else if let Some(ms_str) = id_raw.strip_suffix("-*") {
         // Auto‐generate sequence only
         let ms = match ms_str.parse::<u64>() {
@@ -89,7 +89,7 @@ pub fn cmd_xadd(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Resu
         // Default base sequence: 1 when ms==0, else 0
         let base = if ms == 0 { 1 } else { 0 };
         let seq = max_seq.map(|n| n + 1).unwrap_or(base);
-        (ms, seq, format!("{}-{}", ms, seq))
+        (ms, seq, format!("{ms}-{seq}"))
     } else {
         // Explicit "<ms>-<seq>"
         let mut parts = id_raw.splitn(2, '-');

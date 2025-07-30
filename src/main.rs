@@ -52,10 +52,10 @@ fn main() -> io::Result<()> {
     // If this node is a slave, spin up replication_loop
     if cfg.role == Role::Slave {
         let ctx_clone = ctx.clone();
-        let replica_stream = crate::replication::replica_handshake(&*cfg)?;
+        let replica_stream = replication::replica_handshake(&cfg)?;
         std::thread::spawn(move || {
             if let Err(e) = replication_loop(replica_stream, ctx_clone) {
-                eprintln!("replication error: {}", e);
+                eprintln!("replication error: {e}");
             }
         });
     }
@@ -69,7 +69,7 @@ fn main() -> io::Result<()> {
         let ctx_clone = ctx.clone();
         std::thread::spawn(move || {
             if let Err(e) = handle_client(stream, ctx_clone) {
-                eprintln!("Client error: {}", e);
+                eprintln!("Client error: {e}");
             }
         });
     }

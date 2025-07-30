@@ -38,7 +38,7 @@ pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Re
     fn parse_start(raw: &str) -> Result<(u64, u64), ()> {
         if raw == "-" {
             Ok((0, 0))
-        } else if let Some(_) = raw.find('-') {
+        } else if raw.find('-').is_some() {
             let mut p = raw.splitn(2, '-');
             let ms = p.next().unwrap().parse().map_err(|_| ())?;
             let seq = p.next().unwrap().parse().map_err(|_| ())?;
@@ -53,7 +53,7 @@ pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Re
         if raw == "+" {
             // to the end of the stream
             Ok((u64::MAX, u64::MAX))
-        } else if let Some(_) = raw.find('-') {
+        } else if raw.find('-').is_some() {
             let mut p = raw.splitn(2, '-');
             let ms = p.next().unwrap().parse().map_err(|_| ())?;
             let seq = p.next().unwrap().parse().map_err(|_| ())?;
@@ -113,7 +113,7 @@ pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Re
         write!(out, "*2\r\n")?;
         write_bulk_string(out, &entry.id)?;
         let kvs = entry.fields.len() * 2;
-        write!(out, "*{}\r\n", kvs)?;
+        write!(out, "*{kvs}\r\n")?;
         for (k, v) in entry.fields {
             write_bulk_string(out, &k)?;
             write_bulk_string(out, &v)?;

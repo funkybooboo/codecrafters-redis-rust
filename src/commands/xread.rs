@@ -76,7 +76,7 @@ pub fn cmd_xread(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Res
                     }
                     (lm, ls)
                 })
-            } else if let Some(_) = start_raw.find('-') {
+            } else if start_raw.find('-').is_some() {
                 // explicit "ms-seq"
                 let mut p = start_raw.splitn(2, '-');
                 let ms = p.next().unwrap().parse().unwrap_or(0);
@@ -201,7 +201,7 @@ pub fn cmd_xread(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Res
             write!(out, "*2\r\n")?;
             write_bulk_string(out, &entry.id)?;
             let kvs = entry.fields.len() * 2;
-            write!(out, "*{}\r\n", kvs)?;
+            write!(out, "*{kvs}\r\n")?;
             for (k, v) in entry.fields {
                 write_bulk_string(out, &k)?;
                 write_bulk_string(out, &v)?;

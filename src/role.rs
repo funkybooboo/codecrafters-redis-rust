@@ -30,7 +30,7 @@ impl FromStr for Role {
         match s.to_lowercase().as_str() {
             "master" => Ok(Role::Master),
             "slave" => Ok(Role::Slave),
-            other => Err(format!("invalid role: {}", other)),
+            other => Err(format!("invalid role: {other}")),
         }
     }
 }
