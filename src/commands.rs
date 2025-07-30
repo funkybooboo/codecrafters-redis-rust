@@ -262,26 +262,26 @@ pub fn cmd_rpush(
     args: &[String],
     ctx: &Context,
 ) -> io::Result<()> {
-    if !check_len(out, args, 3, "usage: RPUSH <key> <value>") {
+    if args.len() < 3 {
+        write_error(out, "usage: RPUSH <key> <value> [value ...]")?;
         return Ok(());
     }
 
     let key = &args[1];
-    let val = args[2].clone();
+    let values = &args[2..];
     let mut store = ctx.store.lock().unwrap();
 
     match store.get_mut(key) {
         Some((Value::List(ref mut list), _)) => {
-            list.push(val);
-            let len = list.len();
-            write!(out, ":{}\r\n", len)?;
+            list.extend_from_slice(values);
+            write!(out, ":{}\r\n", list.len())?;
         }
         Some((Value::String(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
         }
         None => {
-            store.insert(key.clone(), (Value::List(vec![val]), None));
-            write!(out, ":1\r\n")?;
+            store.insert(key.clone(), (Value::List(values.to_vec()), None));
+            write!(out, ":{}\r\n", values.len())?;
         }
     }
 
