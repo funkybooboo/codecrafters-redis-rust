@@ -9,7 +9,7 @@ use crate::config::ServerConfig;
 use crate::resp::{
     write_simple_string, write_error, write_bulk_string, check_len,
 };
-use crate::rdb::{Store, Value, EMPTY_RDB};
+use crate::rdb::{Store, StreamEntry, Value, EMPTY_RDB};
 use crate::role::Role;
 use crate::server::BlockingList;
 
@@ -48,6 +48,7 @@ pub fn make_registry() -> HashMap<String, CmdFn> {
     m.insert("LPOP".into(), cmd_lpop as CmdFn);
     m.insert("BLPOP".into(), cmd_blpop as CmdFn);
     m.insert("TYPE".into(), cmd_type as CmdFn);
+    m.insert("XADD".into(), cmd_xadd as CmdFn);
     m
 }
 
@@ -285,7 +286,7 @@ pub fn cmd_rpush(
             list.extend_from_slice(values);
             write!(out, ":{}\r\n", list.len())?;
         }
-        Some((Value::String(_), _)) => {
+        Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
             return Ok(());
         }
@@ -374,7 +375,7 @@ pub fn cmd_lrange(
                 write!(out, "${}\r\n{}\r\n", item.len(), item)?;
             }
         }
-        Some((Value::String(_), _)) => {
+        Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
         }
         None => {
@@ -406,7 +407,7 @@ pub fn cmd_lpush(
             }
             write!(out, ":{}\r\n", list.len())?;
         }
-        Some((Value::String(_), _)) => {
+        Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
         }
         None => {
@@ -438,11 +439,10 @@ pub fn cmd_llen(
         Some((Value::List(list), _)) => {
             write!(out, ":{}\r\n", list.len())?;
         }
-        Some((Value::String(_), _)) => {
+        Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
         }
         None => {
-            // List doesn't exist → length 0
             write!(out, ":0\r\n")?;
         }
     }
@@ -504,7 +504,7 @@ pub fn cmd_lpop(
                 }
             }
         }
-        Some((Value::String(_), _)) => {
+        Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
         }
         None => {
@@ -613,14 +613,14 @@ pub fn cmd_type(
                     match val {
                         Value::String(_) => "string",
                         Value::List(_) => "list",
-                        // others to be added later
+                        Value::Stream(_) => "stream",
                     }
                 }
             } else {
                 match val {
                     Value::String(_) => "string",
                     Value::List(_) => "list",
-                    // others to be added later
+                    Value::Stream(_) => "stream",
                 }
             }
         }
@@ -628,4 +628,43 @@ pub fn cmd_type(
     };
 
     write_simple_string(out, response)
+}
+
+pub fn cmd_xadd(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
+    if args.len() < 5 || (args.len() - 3) % 2 != 0 {
+        write_error(out, "usage: XADD <key> <id> <field> <value> [<field> <value> ...]")?;
+        return Ok(());
+    }
+
+    let key = &args[1];
+    let id = args[2].clone();
+
+    let fields: Vec<(String, String)> = args[3..]
+        .chunks(2)
+        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+        .collect();
+
+    let mut store = ctx.store.lock().unwrap();
+
+    match store.get_mut(key) {
+        Some((Value::Stream(ref mut entries), _)) => {
+            entries.push(StreamEntry { id: id.clone(), fields });
+        }
+        Some((_, _)) => {
+            write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
+            return Ok(());
+        }
+        None => {
+            store.insert(
+                key.clone(),
+                (Value::Stream(vec![StreamEntry { id: id.clone(), fields }]), None),
+            );
+        }
+    }
+
+    write_bulk_string(out, &id)
 }

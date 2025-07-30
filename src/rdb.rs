@@ -8,9 +8,16 @@ use std::{
 use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
+pub struct StreamEntry {
+    pub id: String,
+    pub fields: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Value {
     String(String),
     List(Vec<String>),
+    Stream(Vec<StreamEntry>),
 }
 
 pub(crate) type Store = Mutex<HashMap<String, (Value, Option<SystemTime>)>>;
