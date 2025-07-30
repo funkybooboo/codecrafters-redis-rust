@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::thread;
 
 use crate::config::ServerConfig;
@@ -644,62 +644,106 @@ pub fn cmd_xadd(
     let key    = &args[1];
     let id_raw = &args[2];
 
-    // --- Determine (ms, seq) and final_id_str ---
-    let (ms, seq, final_id_str) = if let Some(ms_str) = id_raw.strip_suffix("-*") {
-        // Auto‑sequence case: "<ms>-*"
-        let ms = ms_str.parse::<u64>().unwrap_or_else(|_| {
-            // malformed time part
-            write_error(out, "The ID specified in XADD has invalid format").ok();
-            std::process::exit(0);
-        });
+    // 2) Compute (ms, seq, final_id) based on id_raw
+    let (ms, seq, final_id) = if id_raw == "*" {
+        // Auto‐generate both time and sequence
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before UNIX EPOCH");
+        let ms = now.as_millis() as u64;
 
-        // Scan existing entries for this key to find max seq at this ms
-        let max_seq_for_ms = {
+        // Find max seq for this ms
+        let max_seq = {
             let map = ctx.store.lock().unwrap();
-            if let Some((Value::Stream(entries), _)) = map.get(key) {
-                entries.iter()
-                    .filter_map(|e| {
-                        let mut p = e.id.splitn(2, '-');
-                        let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
-                        let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
-                        if t == ms { Some(s) } else { None }
-                    })
-                    .max()
-            } else {
-                None
+            map.get(key)
+                .and_then(|pair| {
+                    if let Value::Stream(entries) = &pair.0 {
+                        entries.iter()
+                            .filter_map(|e| {
+                                let mut p = e.id.splitn(2, '-');
+                                let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                                let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                                if t == ms { Some(s) } else { None }
+                            })
+                            .max()
+                    } else {
+                        None
+                    }
+                })
+        };
+
+        let seq = max_seq.map(|n| n + 1).unwrap_or(0);
+        (ms, seq, format!("{}-{}", ms, seq))
+
+    } else if let Some(ms_str) = id_raw.strip_suffix("-*") {
+        // Auto‐generate sequence only
+        let ms = match ms_str.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                write_error(out, "The ID specified in XADD has invalid format")?;
+                return Ok(());
             }
         };
 
-        // Default seq = 1 if ms == 0, else 0; then bump by one if we saw something
+        // Find max seq for this ms
+        let max_seq = {
+            let map = ctx.store.lock().unwrap();
+            map.get(key)
+                .and_then(|pair| {
+                    if let Value::Stream(entries) = &pair.0 {
+                        entries.iter()
+                            .filter_map(|e| {
+                                let mut p = e.id.splitn(2, '-');
+                                let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                                let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
+                                if t == ms { Some(s) } else { None }
+                            })
+                            .max()
+                    } else {
+                        None
+                    }
+                })
+        };
+
+        // Default base sequence: 1 when ms==0, else 0
         let base = if ms == 0 { 1 } else { 0 };
-        let seq = max_seq_for_ms.map(|n| n + 1).unwrap_or(base);
-        let final_id = format!("{}-{}", ms, seq);
-        (ms, seq, final_id)
+        let seq  = max_seq.map(|n| n + 1).unwrap_or(base);
+        (ms, seq, format!("{}-{}", ms, seq))
 
     } else {
-        // Explicit case: "<ms>-<seq>"
+        // Explicit "<ms>-<seq>"
         let mut parts = id_raw.splitn(2, '-');
-        let ms = parts.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-            write_error(out, "The ID specified in XADD has invalid format").ok();
-            std::process::exit(0);
-        });
-        let seq = parts.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-            write_error(out, "The ID specified in XADD has invalid format").ok();
-            std::process::exit(0);
-        });
+        let ms = match parts.next().and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => {
+                write_error(out, "The ID specified in XADD has invalid format")?;
+                return Ok(());
+            }
+        };
+        let seq = match parts.next().and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => {
+                write_error(out, "The ID specified in XADD has invalid format")?;
+                return Ok(());
+            }
+        };
         (ms, seq, id_raw.clone())
     };
 
-    // --- If this was explicit, enforce monotonic ordering against the overall last-entry ---
-    if !id_raw.ends_with("-*") {
+    // 3) If explicit, enforce monotonic ordering
+    if !id_raw.ends_with("-*") && id_raw != "*" {
         let (last_ms, last_seq) = {
             let map = ctx.store.lock().unwrap();
-            if let Some((Value::Stream(entries), _)) = map.get(key) {
-                if let Some(last) = entries.last() {
-                    let mut p   = last.id.splitn(2, '-');
-                    let lms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
-                    let lseq = p.next().unwrap().parse::<u64>().unwrap_or(0);
-                    (lms, lseq)
+            if let Some(pair) = map.get(key) {
+                if let Value::Stream(entries) = &pair.0 {
+                    if let Some(last) = entries.last() {
+                        let mut p   = last.id.splitn(2, '-');
+                        let lms  = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                        let lseq = p.next().unwrap().parse::<u64>().unwrap_or(0);
+                        (lms, lseq)
+                    } else {
+                        (0, 0)
+                    }
                 } else {
                     (0, 0)
                 }
@@ -708,7 +752,7 @@ pub fn cmd_xadd(
             }
         };
 
-        // Special check for the 0-0 minimum
+        // Special minimum check for 0-0
         let is_minimum = ms == 0 && seq == 0;
         if ms < last_ms || (ms == last_ms && seq <= last_seq) {
             if is_minimum {
@@ -720,7 +764,7 @@ pub fn cmd_xadd(
         }
     }
 
-    // --- All good: build the entry and insert it ---
+    // 4) Build fields and insert entry
     let fields: Vec<(String, String)> = args[3..]
         .chunks(2)
         .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
@@ -729,7 +773,7 @@ pub fn cmd_xadd(
     let mut map = ctx.store.lock().unwrap();
     match map.get_mut(key) {
         Some((Value::Stream(ref mut entries), _)) => {
-            entries.push(StreamEntry { id: final_id_str.clone(), fields });
+            entries.push(StreamEntry { id: final_id.clone(), fields });
         }
         Some(_) => {
             write_error(out, "WRONGTYPE Operation against a key holding the wrong kind of value")?;
@@ -738,11 +782,11 @@ pub fn cmd_xadd(
         None => {
             map.insert(
                 key.clone(),
-                (Value::Stream(vec![StreamEntry { id: final_id_str.clone(), fields }]), None),
+                (Value::Stream(vec![StreamEntry { id: final_id.clone(), fields }]), None),
             );
         }
     }
 
-    // 4) Reply with the new ID
-    write_bulk_string(out, &final_id_str)
+    // 5) Reply with the chosen ID
+    write_bulk_string(out, &final_id)
 }
