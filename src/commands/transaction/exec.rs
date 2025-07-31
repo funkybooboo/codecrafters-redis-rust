@@ -8,31 +8,32 @@ use crate::{
 };
 
 /// EXEC → if no MULTI, error; otherwise execute every queued command
-/// and return an array of their replies.
+/// (capturing each command’s own error or success reply) and emit them
+/// as an array, then clear the transaction.
 pub fn cmd_exec(
     out: &mut TcpStream,
     _args: &[String],
     ctx: &mut Context,
 ) -> io::Result<()> {
+    // 1) If we never saw MULTI, error out
     if !ctx.in_transaction {
-        // EXEC without a prior MULTI
         write_error(out, "EXEC without MULTI")?;
         return Ok(());
     }
 
-    // 1) Swap out the queued commands, leaving ctx.queued empty
+    // 2) Take ownership of the queued commands, leaving ctx.queued empty
     let queued = std::mem::take(&mut ctx.queued);
 
-    // 2) Write the array header
+    // 3) Write the array header: one element per queued command
     write!(out, "*{}\r\n", queued.len())?;
 
-    // 3) Replay each queued command
-    //    (now `queued` is owned by us, no borrow of ctx remains)
+    // 4) Replay each queued command in order.
+    //    dispatch_cmd will write exactly one RESP reply (OK, error, integer, bulk, etc.)
     for (cmd_name, cmd_args) in queued {
         dispatch_cmd(&cmd_name, out, &cmd_args, ctx)?;
     }
 
-    // 4) Tear down the transaction
+    // 5) Tear down transaction state
     ctx.in_transaction = false;
     // ctx.queued is already empty
 
