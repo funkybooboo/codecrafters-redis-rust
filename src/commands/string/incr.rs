@@ -9,11 +9,7 @@ use std::net::TcpStream;
 /// - Stage 1: key exists & numeric → increment  
 /// - Stage 2: key missing → set to “1”  
 /// - Stage 3: key exists but non-numeric → error
-pub fn cmd_incr(
-    out: &mut TcpStream,
-    args: &[String],
-    ctx: &Context,
-) -> io::Result<()> {
+pub fn cmd_incr(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
     // 1) Validate args
     if args.len() != 2 {
         write_error(out, "usage: INCR <key>")?;

@@ -1,2 +1,2 @@
-pub mod replconf;
 pub mod psync;
+pub mod replconf;

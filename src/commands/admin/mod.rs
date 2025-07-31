@@ -1,3 +1,3 @@
-pub mod keys;
-pub mod info;
 pub mod config;
+pub mod info;
+pub mod keys;

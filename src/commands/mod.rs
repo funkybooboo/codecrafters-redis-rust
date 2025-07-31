@@ -1,24 +1,14 @@
 mod admin;
-mod string;
-mod stream;
-mod replication;
-mod list;
 mod connection;
+mod list;
+mod replication;
+mod stream;
+mod string;
+mod transaction;
 
 use lazy_static::lazy_static;
 use std::{collections::HashMap, io, net::TcpStream};
 
-use crate::resp::write_error;
-use crate::Context;
-use crate::commands::string::get::cmd_get;
-use crate::commands::string::incr::cmd_incr;
-use crate::commands::string::set::cmd_set;
-use crate::commands::string::typee::cmd_type;
-use crate::commands::stream::xadd::cmd_xadd;
-use crate::commands::stream::xrange::cmd_xrange;
-use crate::commands::stream::xread::cmd_xread;
-use crate::commands::replication::psync::cmd_psync;
-use crate::commands::replication::replconf::cmd_replconf;
 use crate::commands::admin::config::cmd_config;
 use crate::commands::admin::info::cmd_info;
 use crate::commands::admin::keys::cmd_keys;
@@ -30,6 +20,18 @@ use crate::commands::list::lpop::cmd_lpop;
 use crate::commands::list::lpush::cmd_lpush;
 use crate::commands::list::lrange::cmd_lrange;
 use crate::commands::list::rpush::cmd_rpush;
+use crate::commands::replication::psync::cmd_psync;
+use crate::commands::replication::replconf::cmd_replconf;
+use crate::commands::stream::xadd::cmd_xadd;
+use crate::commands::stream::xrange::cmd_xrange;
+use crate::commands::stream::xread::cmd_xread;
+use crate::commands::string::get::cmd_get;
+use crate::commands::string::incr::cmd_incr;
+use crate::commands::string::set::cmd_set;
+use crate::commands::string::typee::cmd_type;
+use crate::commands::transaction::multi::cmd_multi;
+use crate::resp::write_error;
+use crate::Context;
 
 /// Every command has this signature
 pub type CmdFn = fn(&mut TcpStream, &[String], &Context) -> io::Result<()>;
@@ -58,6 +60,7 @@ lazy_static! {
         m.insert("XRANGE".into(),   cmd_xrange  as CmdFn);   // read a range of entries from a stream
         m.insert("XREAD".into(),    cmd_xread   as CmdFn);   // read from one or more streams (optionally blocking)
         m.insert("INCR".into(),     cmd_incr    as CmdFn);   // increment the integer value of a key by one
+        m.insert("MULTI".into(),    cmd_multi   as CmdFn); // start a transaction
         m
     };
 
@@ -75,13 +78,7 @@ lazy_static! {
 pub fn is_write_cmd(cmd: &str) -> bool {
     matches!(
         cmd,
-        "SET"
-      | "DEL"
-      | "RPUSH"
-      | "LPUSH"
-      | "LPOP"
-      | "INCR"
-      | "XADD"
+        "SET" | "DEL" | "RPUSH" | "LPUSH" | "LPOP" | "INCR" | "XADD"
     )
 }
 
