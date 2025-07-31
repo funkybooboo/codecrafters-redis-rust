@@ -29,6 +29,7 @@ use crate::commands::string::get::cmd_get;
 use crate::commands::string::incr::cmd_incr;
 use crate::commands::string::set::cmd_set;
 use crate::commands::string::typee::cmd_type;
+use crate::commands::transaction::discard::cmd_discard;
 use crate::commands::transaction::exec::cmd_exec;
 use crate::commands::transaction::multi::cmd_multi;
 use crate::resp::write_error;
@@ -62,6 +63,7 @@ lazy_static! {
         m.insert("INCR".into(),     cmd_incr    as CmdFn);   // increment the integer value of a key by one
         m.insert("MULTI".into(),    cmd_multi   as CmdFn);   // start a transaction
         m.insert("EXEC".into(),     cmd_exec    as CmdFn);   // run queued commands (error if no MULTI)
+        m.insert("DISCARD".into(),  cmd_discard as CmdFn);   // abort the current transaction and clear all queued commands
         m
     };
 
