@@ -6,7 +6,9 @@ use std::io::Write;
 use std::net::TcpStream;
 
 /// INCR <key>
-/// Stage 2: if the key doesn’t exist, set it to 1
+/// - Stage 1: key exists & numeric → increment  
+/// - Stage 2: key missing → set to “1”  
+/// - Stage 3: key exists but non-numeric → error
 pub fn cmd_incr(
     out: &mut TcpStream,
     args: &[String],
@@ -19,33 +21,36 @@ pub fn cmd_incr(
     }
     let key = &args[1];
 
-    // 2) Lock store and look up key
+    // 2) Lock store
     let mut map = ctx.store.lock().unwrap();
 
-    if let Some((val, _expiry)) = map.get_mut(key) {
-        // 3a) Key exists: only handle existing String values
-        if let Value::String(s) = val {
-            match s.parse::<i64>() {
-                Ok(n) => {
-                    let new = n + 1;
-                    *s = new.to_string();
-                    // integer reply
-                    write!(out, ":{}\r\n", new)?;
-                }
-                Err(_) => {
-                    // non-numeric string → error (stage 3 will refine this)
-                    write_error(out, "ERR value is not an integer or out of range")?;
+    match map.get_mut(key) {
+        Some((val, _)) => match val {
+            Value::String(s) => {
+                // Try parsing current value
+                match s.parse::<i64>() {
+                    // Stage 1: numeric → increment
+                    Ok(n) => {
+                        let new = n + 1;
+                        *s = new.to_string();
+                        write!(out, ":{new}\r\n")?;
+                    }
+                    // Stage 3: non-numeric → error
+                    Err(_) => {
+                        write_error(out, "value is not an integer or out of range")?;
+                    }
                 }
             }
-        } else {
-            // wrong data type
-            write_error(out, "ERR value is not an integer or out of range")?;
+            // Stage 3: wrong type → same error
+            _ => {
+                write_error(out, "value is not an integer or out of range")?;
+            }
+        },
+        // Stage 2: key missing → set to 1
+        None => {
+            map.insert(key.clone(), (Value::String("1".into()), None));
+            write!(out, ":1\r\n")?;
         }
-    } else {
-        // 3b) Key does not exist → set to 1
-        map.insert(key.clone(), (Value::String("1".into()), None));
-        // integer reply for newly-created key
-        write!(out, ":1\r\n")?;
     }
 
     Ok(())
