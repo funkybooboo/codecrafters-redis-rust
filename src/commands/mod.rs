@@ -29,6 +29,7 @@ use crate::commands::string::get::cmd_get;
 use crate::commands::string::incr::cmd_incr;
 use crate::commands::string::set::cmd_set;
 use crate::commands::string::typee::cmd_type;
+use crate::commands::transaction::exec::cmd_exec;
 use crate::commands::transaction::multi::cmd_multi;
 use crate::resp::write_error;
 use crate::Context;
@@ -60,7 +61,8 @@ lazy_static! {
         m.insert("XRANGE".into(),   cmd_xrange  as CmdFn);   // read a range of entries from a stream
         m.insert("XREAD".into(),    cmd_xread   as CmdFn);   // read from one or more streams (optionally blocking)
         m.insert("INCR".into(),     cmd_incr    as CmdFn);   // increment the integer value of a key by one
-        m.insert("MULTI".into(),    cmd_multi   as CmdFn); // start a transaction
+        m.insert("MULTI".into(),    cmd_multi   as CmdFn);   // start a transaction
+        m.insert("EXEC".into(),     cmd_exec    as CmdFn);   // run queued commands (error if no MULTI)
         m
     };
 
