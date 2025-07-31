@@ -1,12 +1,17 @@
 use crate::commands::Context;
 use crate::rdb::Value;
 use crate::resp::write_error;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 use std::net::TcpStream;
 
 /// INCR <key>
-/// (Stage 1: only supports keys that already exist with numeric String values)
-pub fn cmd_incr(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+/// Stage 2: if the key doesn’t exist, set it to 1
+pub fn cmd_incr(
+    out: &mut TcpStream,
+    args: &[String],
+    ctx: &Context,
+) -> io::Result<()> {
     // 1) Validate args
     if args.len() != 2 {
         write_error(out, "usage: INCR <key>")?;
@@ -16,30 +21,31 @@ pub fn cmd_incr(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Resu
 
     // 2) Lock store and look up key
     let mut map = ctx.store.lock().unwrap();
+
     if let Some((val, _expiry)) = map.get_mut(key) {
-        // 3) Only handle existing String values
+        // 3a) Key exists: only handle existing String values
         if let Value::String(s) = val {
-            // parse as 64-bit integer
             match s.parse::<i64>() {
                 Ok(n) => {
                     let new = n + 1;
-                    // store back as a String
                     *s = new.to_string();
                     // integer reply
-                    write!(out, ":{new}\r\n")?;
+                    write!(out, ":{}\r\n", new)?;
                 }
                 Err(_) => {
-                    // later stages will handle non-numeric
+                    // non-numeric string → error (stage 3 will refine this)
                     write_error(out, "ERR value is not an integer or out of range")?;
                 }
             }
         } else {
-            // later stages will handle WRONGTYPE
+            // wrong data type
             write_error(out, "ERR value is not an integer or out of range")?;
         }
     } else {
-        // later stages will handle non-existent keys
-        write_error(out, "ERR no such key")?;
+        // 3b) Key does not exist → set to 1
+        map.insert(key.clone(), (Value::String("1".into()), None));
+        // integer reply for newly-created key
+        write!(out, ":1\r\n")?;
     }
 
     Ok(())
