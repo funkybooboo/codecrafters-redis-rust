@@ -5,7 +5,7 @@ use std::io::Write;
 use std::net::TcpStream;
 
 /// CONFIG GET <dir|dbfilename>
-pub fn cmd_config(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_config(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 3, "usage: CONFIG GET <dir|dbfilename>") {
         return Ok(());
     }

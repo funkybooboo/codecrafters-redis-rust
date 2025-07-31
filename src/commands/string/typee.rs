@@ -5,7 +5,7 @@ use std::io;
 use std::net::TcpStream;
 use std::time::SystemTime;
 
-pub fn cmd_type(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_type(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: TYPE <key>") {
         return Ok(());
     }

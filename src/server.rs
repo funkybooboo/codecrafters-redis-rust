@@ -8,7 +8,7 @@ use std::{
     net::TcpStream,
 };
 
-pub fn handle_client(stream: TcpStream, ctx: Context) -> io::Result<()> {
+pub fn handle_client(stream: TcpStream, mut ctx: Context) -> io::Result<()> {
     let mut reader = io::BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -19,7 +19,7 @@ pub fn handle_client(stream: TcpStream, ctx: Context) -> io::Result<()> {
         let cmd = args[0].to_uppercase();
 
         // run *any* command
-        dispatch_cmd(&cmd, &mut writer, &args, &ctx)?;
+        dispatch_cmd(&cmd, &mut writer, &args, &mut ctx)?;
         writer.flush()?;
 
         // then propagate writes

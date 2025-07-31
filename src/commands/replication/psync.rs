@@ -9,7 +9,7 @@ use std::net::TcpStream;
 /// PSYNC <master_replid> <master_repl_offset>
 ///   → +FULLRESYNC <replid> 0\r\n
 ///   → $<len>\r\n<empty RDB bytes>
-pub fn cmd_psync(stream: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_psync(stream: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     // 1) Validate args
     if !check_len(
         stream,

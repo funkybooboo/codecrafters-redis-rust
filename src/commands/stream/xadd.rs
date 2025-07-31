@@ -5,7 +5,7 @@ use std::io;
 use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn cmd_xadd(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_xadd(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     // 1) Validate argument count
     if args.len() < 5 || (args.len() - 3) % 2 != 0 {
         write_error(

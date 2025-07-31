@@ -34,8 +34,7 @@ use crate::commands::transaction::multi::cmd_multi;
 use crate::resp::write_error;
 use crate::Context;
 
-/// Every command has this signature
-pub type CmdFn = fn(&mut TcpStream, &[String], &Context) -> io::Result<()>;
+pub type CmdFn = fn(&mut TcpStream, &[String], &mut Context) -> io::Result<()>;
 
 lazy_static! {
     /// Full map of *all* commands
@@ -90,7 +89,7 @@ pub fn dispatch_cmd(
     name: &str,
     out: &mut TcpStream,
     args: &[String],
-    ctx: &Context,
+    ctx: &mut Context,
 ) -> io::Result<()> {
     if let Some(cmd_fn) = ALL_CMDS.get(name) {
         cmd_fn(out, args, ctx)
@@ -106,7 +105,7 @@ pub fn replay_cmd(
     name: &str,
     out: &mut TcpStream,
     args: &[String],
-    ctx: &Context,
+    ctx: &mut Context,
 ) -> io::Result<()> {
     if let Some(cmd_fn) = WRITE_CMDS.get(name) {
         let _ = cmd_fn(out, args, ctx);

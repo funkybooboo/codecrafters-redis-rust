@@ -5,7 +5,7 @@ use std::io;
 use std::io::Write;
 use std::net::TcpStream;
 
-pub fn cmd_rpush(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_rpush(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if args.len() < 3 {
         write_error(out, "usage: RPUSH <key> <value> [value ...]")?;
         return Ok(());

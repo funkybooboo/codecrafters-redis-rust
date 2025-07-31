@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::net::TcpStream;
 
 /// KEYS "*"
-pub fn cmd_keys(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_keys(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: KEYS *") {
         return Ok(());
     }

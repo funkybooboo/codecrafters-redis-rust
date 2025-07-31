@@ -4,7 +4,7 @@ use std::io;
 use std::net::TcpStream;
 
 /// INFO replication
-pub fn cmd_info(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_info(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: INFO replication") {
         return Ok(());
     }

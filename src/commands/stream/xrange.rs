@@ -5,7 +5,7 @@ use std::io;
 use std::io::Write;
 use std::net::TcpStream;
 
-pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     // 1) Usage check
     if args.len() != 4 {
         write_error(out, "usage: XRANGE <key> <start> <end>")?;

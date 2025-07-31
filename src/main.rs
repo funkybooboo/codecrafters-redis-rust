@@ -23,12 +23,19 @@ use std::{
 
 pub type BlockingList = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
 
+/// Holds *both* the global server state (all Arcs)
+/// and the per‐connection transaction state (plain fields).
 #[derive(Clone)]
 pub struct Context {
-    pub cfg: Arc<ServerConfig>, // now Arc, not &
-    pub store: Arc<Store>,      // now Arc<Mutex<…>>
-    pub replicas: Arc<Mutex<Vec<TcpStream>>>,
-    pub blocking: BlockingList,
+    // global:
+    pub cfg:       Arc<ServerConfig>,
+    pub store:     Arc<Store>,
+    pub replicas:  Arc<Mutex<Vec<TcpStream>>>,
+    pub blocking:  BlockingList,
+
+    // per‐connection:
+    pub in_transaction: bool,                       // tracks MULTI…EXEC
+    pub queued: Vec<(String, Vec<String>)>,         // buffers (cmd, args)
 }
 
 fn main() -> io::Result<()> {
@@ -42,16 +49,18 @@ fn main() -> io::Result<()> {
     let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
 
     // build a single Context
-    let ctx = Context {
-        cfg: cfg.clone(),
-        store: store.clone(),
-        replicas: replicas.clone(),
-        blocking: blocking_clients.clone(),
+    let base_ctx = Context {
+        cfg:              cfg.clone(),
+        store:            store.clone(),
+        replicas:         replicas.clone(),
+        blocking:         blocking_clients.clone(),
+        in_transaction:   false,
+        queued:           Vec::new(),
     };
 
     // If this node is a slave, spin up replication_loop
     if cfg.role == Role::Slave {
-        let ctx_clone = ctx.clone();
+        let ctx_clone = base_ctx.clone();
         let replica_stream = replication::replica_handshake(&cfg)?;
         std::thread::spawn(move || {
             if let Err(e) = replication_loop(replica_stream, ctx_clone) {
@@ -66,7 +75,7 @@ fn main() -> io::Result<()> {
 
     for stream in listener.incoming() {
         let stream = stream?;
-        let ctx_clone = ctx.clone();
+        let ctx_clone = base_ctx.clone();
         std::thread::spawn(move || {
             if let Err(e) = handle_client(stream, ctx_clone) {
                 eprintln!("Client error: {e}");

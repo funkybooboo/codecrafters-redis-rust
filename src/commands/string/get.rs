@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::time::SystemTime;
 
 /// GET key -> BulkString or NullBulk
-pub fn cmd_get(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_get(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: GET <key>") {
         return Ok(());
     }

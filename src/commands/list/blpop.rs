@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{io, thread};
 
-pub fn cmd_blpop(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_blpop(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if args.len() != 3 {
         write_error(out, "usage: BLPOP <key> <timeout>")?;
         return Ok(());

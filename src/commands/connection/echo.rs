@@ -4,7 +4,7 @@ use std::io;
 use std::net::TcpStream;
 
 /// ECHO <msg> -> BulkString(msg)
-pub fn cmd_echo(out: &mut TcpStream, args: &[String], _ctx: &Context) -> io::Result<()> {
+pub fn cmd_echo(out: &mut TcpStream, args: &[String], _ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 2, "usage: ECHO <msg>") {
         return Ok(());
     }

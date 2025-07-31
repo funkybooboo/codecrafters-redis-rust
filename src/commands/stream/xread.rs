@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use std::{io, thread};
 
 /// XREAD [BLOCK <ms>] STREAMS <key> [<key> ...] <id> [<id> ...]
-pub fn cmd_xread(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_xread(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     // 1) Parse optional BLOCK
     let mut idx = 1;
     let block_ms = if args.get(idx).map(|s| s.to_lowercase()) == Some("block".into()) {

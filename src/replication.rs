@@ -58,7 +58,7 @@ fn wait_for_it(stream: &mut TcpStream) -> io::Result<String> {
 
 /// Read commands from master, replay only write‐type ones through your normal cmd_*
 /// (which mutates ctx.store for you). Any “OK” they emit is ignored.
-pub fn replication_loop(stream: TcpStream, ctx: Context) -> io::Result<()> {
+pub fn replication_loop(stream: TcpStream, mut ctx: Context) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -68,7 +68,7 @@ pub fn replication_loop(stream: TcpStream, ctx: Context) -> io::Result<()> {
         }
         let cmd = args[0].to_uppercase();
         // replay only write‐type commands:
-        replay_cmd(&cmd, &mut writer, &args, &ctx)?;
+        replay_cmd(&cmd, &mut writer, &args, &mut ctx)?;
     }
 
     Ok(())

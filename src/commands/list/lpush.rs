@@ -4,7 +4,7 @@ use crate::resp::write_error;
 use std::io::{self, Write};
 use std::net::TcpStream;
 
-pub fn cmd_lpush(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_lpush(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if args.len() < 3 {
         write_error(out, "usage: LPUSH <key> <value> [value ...]")?;
         return Ok(());

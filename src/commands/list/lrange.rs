@@ -4,7 +4,7 @@ use crate::resp::{check_len, write_error};
 use std::io::{self, Write};
 use std::net::TcpStream;
 
-pub fn cmd_lrange(out: &mut TcpStream, args: &[String], ctx: &Context) -> io::Result<()> {
+pub fn cmd_lrange(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
     if !check_len(out, args, 4, "usage: LRANGE <key> <start> <stop>") {
         return Ok(());
     }
