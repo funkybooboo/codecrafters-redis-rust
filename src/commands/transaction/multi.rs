@@ -1,10 +1,8 @@
-use crate::commands::Context;
-use crate::resp::write_simple_string;
 use std::io;
 use std::net::TcpStream;
+use crate::resp::write_simple_string;
+use crate::commands::Context;
 
-/// MULTI
-/// Starts a transaction: just reply +OK
 pub fn cmd_multi(
     out: &mut TcpStream,
     _args: &[String],
