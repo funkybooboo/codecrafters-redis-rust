@@ -12,7 +12,6 @@ mod context;
 use crate::{
     config::{parse_config, ServerConfig},
     rdb::load_rdb_snapshot,
-    replication::replication_loop,
     role::Role,
     server::handle_client,
 };
@@ -31,16 +30,25 @@ fn main() -> io::Result<()> {
     let cfg = Arc::new(cfg);
     println!("[main] Configuration parsed: {:?}", cfg);
 
-    let snapshot_path = format!("{}/{}", cfg.dir, cfg.dbfilename);
-    println!("[main] Loading RDB snapshot from {}", snapshot_path);
-    let raw_snapshot = load_rdb_snapshot(snapshot_path)?;
-    println!("[main] Snapshot loaded successfully.");
+    // Load snapshot only if master
+    let store_data = match cfg.role {
+        Role::Master => {
+            let snapshot_path = format!("{}/{}", cfg.dir, cfg.dbfilename);
+            println!("[main] Loading RDB snapshot from {}", snapshot_path);
+            let raw_snapshot = load_rdb_snapshot(snapshot_path)?;
+            println!("[main] Snapshot loaded successfully.");
+            raw_snapshot
+        }
+        Role::Slave => {
+            println!("[main] Replica node — skipping local snapshot load.");
+            HashMap::new()
+        }
+    };
 
-    let store = Arc::new(Mutex::new(raw_snapshot));
+    let store = Arc::new(Mutex::new(store_data));
     let replicas = Arc::new(Mutex::new(Vec::new()));
     let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
 
-    // build a single Context
     let base_ctx = Context {
         cfg: cfg.clone(),
         store: store.clone(),
@@ -54,14 +62,11 @@ fn main() -> io::Result<()> {
 
     println!("[main] Context initialized.");
 
-    // If this node is a slave, spin up replication_loop
     if cfg.role == Role::Slave {
-        println!("[main] Node is a replica. Starting replication handshake...");
+        println!("[main] Node is a replica. Starting replication thread...");
         let ctx_clone = base_ctx.clone();
-        let replica_stream = replication::replica_handshake(&cfg)?;
-        println!("[main] Replication handshake successful. Spawning replication loop.");
         std::thread::spawn(move || {
-            if let Err(e) = replication_loop(replica_stream, ctx_clone) {
+            if let Err(e) = replication::handle_replication(ctx_clone) {
                 eprintln!("[replication_loop] replication error: {e}");
             }
         });

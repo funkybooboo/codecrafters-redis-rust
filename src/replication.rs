@@ -2,141 +2,179 @@ use crate::commands::replay_cmd;
 use crate::config::ServerConfig;
 use crate::resp::{peek_resp_command_size, read_resp_array, write_resp_array};
 use crate::Context;
-use std::{io, thread};
-use std::io::{BufRead, BufReader, Read, Write};
+
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::thread;
 use std::time::Duration;
 
-pub fn replica_handshake(cfg: &ServerConfig) -> io::Result<TcpStream> {
-    println!("[replica_handshake] Connecting to master at {}:{}", cfg.master_host, cfg.master_port);
-    let mut master = TcpStream::connect((&cfg.master_host[..], cfg.master_port))?;
-    let mut reader = BufReader::new(master.try_clone()?);
+pub fn handle_replication(mut ctx: Context) -> io::Result<()> {
+    println!("[handle_replication] Beginning full replication process...");
 
-    println!("[replica_handshake] Sending PING");
-    write_resp_array(&mut master, &["PING"])?;
-    let response = wait_for_it(&mut reader)?;
-    println!("[replica_handshake] Received response: {}", response.trim());
+    let mut stream = connect_to_master(&ctx.cfg)?;
+    println!("[handle_replication] Connected to master.");
 
-    println!("[replica_handshake] Sending REPLCONF listening-port {}", cfg.port);
-    write_resp_array(
-        &mut master,
-        &["REPLCONF", "listening-port", &cfg.port.to_string()],
-    )?;
-    let response = wait_for_it(&mut reader)?;
-    println!("[replica_handshake] Received response: {}", response.trim());
+    let mut reader = BufReader::new(stream.try_clone()?);
+    println!("[handle_replication] Cloned stream for reading.");
 
-    println!("[replica_handshake] Sending REPLCONF capa psync2");
-    write_resp_array(&mut master, &["REPLCONF", "capa", "psync2"])?;
-    let response = wait_for_it(&mut reader)?;
-    println!("[replica_handshake] Received response: {}", response.trim());
+    perform_handshake(&mut stream, &mut reader, &ctx.cfg)?;
+    println!("[handle_replication] Handshake complete.");
 
-    println!("[replica_handshake] Sending PSYNC ? -1");
-    write_resp_array(&mut master, &["PSYNC", "?", "-1"])?;
-    let response = wait_for_it(&mut reader)?;
-    println!("[replica_handshake] Received response: {}", response.trim());
+    load_rdb_snapshot(&mut reader, &mut ctx)?;
+    println!("[handle_replication] RDB snapshot loaded.");
 
+    stream_command_loop(&mut reader, &mut stream, &mut ctx)?;
+    println!("[handle_replication] Command streaming loop exited.");
+
+    Ok(())
+}
+
+
+// ========== Phase 1: Connect + Handshake ==========
+
+fn connect_to_master(cfg: &ServerConfig) -> io::Result<TcpStream> {
+    println!("[connect_to_master] Connecting to {}:{}", cfg.master_host, cfg.master_port);
+    TcpStream::connect((&cfg.master_host[..], cfg.master_port))
+}
+
+fn perform_handshake(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    cfg: &ServerConfig,
+) -> io::Result<()> {
+    send_and_expect(stream, reader, &["PING"], "+PONG")?;
+    send_and_expect(stream, reader, &["REPLCONF", "listening-port", &cfg.port.to_string()], "+OK")?;
+    send_and_expect(stream, reader, &["REPLCONF", "capa", "psync2"], "+OK")?;
+    send_and_expect(stream, reader, &["PSYNC", "?", "-1"], "+FULLRESYNC")?;
+
+    Ok(())
+}
+
+fn send_and_expect(
+    writer: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    cmd: &[&str],
+    expected_prefix: &str,
+) -> io::Result<()> {
+    write_resp_array(writer, cmd)?;
+    writer.flush()?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    println!("[handshake] Sent {:?}, received: {}", cmd, line.trim());
+
+    if !line.starts_with(expected_prefix) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Expected {}", expected_prefix)));
+    }
+
+    Ok(())
+}
+
+// ========== Phase 2: Load RDB ==========
+
+fn load_rdb_snapshot(reader: &mut BufReader<TcpStream>, ctx: &mut Context) -> io::Result<()> {
     let mut rdb_header = String::new();
     reader.read_line(&mut rdb_header)?;
-    let rdb_header = rdb_header.trim_end();
-    println!("[replica_handshake] RDB header received: {}", rdb_header);
+    println!("[rdb_load] RDB header: {}", rdb_header.trim());
 
     if !rdb_header.starts_with('$') {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected RDB length header"));
     }
 
-    let rdb_len: usize = rdb_header[1..]
-        .parse()
+    let rdb_len: usize = rdb_header[1..].trim().parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid RDB length"))?;
-    println!("[replica_handshake] Reading RDB snapshot of length: {}", rdb_len);
 
-    let mut rdb_buf = vec![0u8; rdb_len];
+    let mut rdb_buf = vec![0; rdb_len];
     reader.read_exact(&mut rdb_buf)?;
-    println!("[replica_handshake] RDB snapshot successfully read.");
+    println!("[rdb_load] Snapshot read, size: {}", rdb_len);
+    
+    let parsed = crate::rdb::parse_rdb_bytes(&rdb_buf)?;
+    *ctx.store.lock().unwrap() = parsed;
+    println!("[rdb_load] Snapshot loaded into store.");
 
-    Ok(master)
+    let peek_buf = reader.fill_buf()?;
+    println!("[rdb_load] Peek after RDB: {:?}", String::from_utf8_lossy(peek_buf));
+
+    Ok(())
 }
 
-fn wait_for_it(reader: &mut dyn BufRead) -> io::Result<String> {
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    println!("[wait_for_it] Received line: {}", line.trim());
-    Ok(line)
-}
+// ========== Phase 3: Stream Command Loop ==========
 
-pub fn replication_loop(stream: TcpStream, mut ctx: Context) -> io::Result<()> {
-    println!("[replication_loop] Starting replication loop...");
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = stream;
+fn stream_command_loop(
+    reader: &mut BufReader<TcpStream>,
+    writer: &mut TcpStream,
+    ctx: &mut Context,
+) -> io::Result<()> {
+    println!("[stream_loop] Entered command loop.");
 
     loop {
-        println!("[replication_loop] Peeking next command size...");
-        let cmd_size = match peek_resp_command_size(&mut reader) {
+        println!("[stream_loop] Loop tick. Checking for command size...");
+        let cmd_size = match peek_resp_command_size(reader) {
             Ok(0) => {
-                // incomplete, wait and retry
+                println!("[stream_loop] No command detected, sleeping...");
                 thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            Ok(n) => n,
+            Ok(n) => {
+                println!("[stream_loop] Peeked command size: {n}");
+                n
+            }
             Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                println!("[replication_loop] EOF received, ending loop.");
+                println!("[stream_loop] Master disconnected (EOF).");
                 break;
             }
             Err(e) => {
-                eprintln!("[replication_loop] peek error: {}", e);
+                eprintln!("[stream_loop] Peek error: {}", e);
                 break;
             }
         };
 
-        let offset_before = ctx.master_repl_offset;
-
-        println!("[replication_loop] Reading next command...");
-        let maybe_args = read_resp_array(&mut reader);
+        println!("[stream_loop] Attempting to read RESP array...");
+        let maybe_args = read_resp_array(reader);
         match maybe_args {
             Err(e) => {
-                eprintln!("[replication_loop] Error reading command: {}", e);
+                eprintln!("[stream_loop] Error reading command: {}", e);
                 break;
             }
             Ok(None) => {
-                println!("[replication_loop] No more commands, ending loop.");
+                println!("[stream_loop] No more commands.");
                 break;
             }
             Ok(Some(args)) => {
+                println!("[stream_loop] Received command: {:?}", args);
+
                 if args.is_empty() {
-                    println!("[replication_loop] Empty command received, skipping.");
+                    println!("[stream_loop] Empty command.");
                     continue;
                 }
 
                 let cmd = args[0].to_uppercase();
-                println!("[replication_loop] Received command: {} {:?}", cmd, &args[1..]);
-
-                if cmd == "REPLCONF"
-                    && args.len() == 3
-                    && args[1].to_uppercase() == "GETACK"
-                    && args[2] == "*"
-                {
-                    println!(
-                        "[replication_loop] Handling REPLCONF GETACK request. Returning offset {} (before {} byte command)",
-                        offset_before, cmd_size
-                    );
-                    write_resp_array(&mut writer, &["REPLCONF", "ACK", &offset_before.to_string()])?;
+                if is_getack(&args) {
+                    println!("[stream_loop] Detected GETACK command.");
+                    let offset = ctx.master_repl_offset;
+                    write_resp_array(writer, &["REPLCONF", "ACK", &offset.to_string()])?;
                     writer.flush()?;
-                    println!("[replication_loop] ACK sent with offset {}", offset_before);
+                    println!("[stream_loop] Sent GETACK with offset {}", offset);
                 } else {
-                    println!("[replication_loop] Replaying command: {}", cmd);
-                    replay_cmd(&cmd, &mut writer, &args, &mut ctx)?;
+                    println!("[stream_loop] Replaying: {:?}", args);
+                    replay_cmd(&cmd, writer, &args, ctx)?;
                     writer.flush()?;
-                    println!("[replication_loop] Command replayed successfully: {}", cmd);
+                    println!("[stream_loop] Done replaying.");
                 }
 
                 ctx.master_repl_offset += cmd_size;
-                println!(
-                    "[replication_loop] Master replication offset updated to {}",
-                    ctx.master_repl_offset
-                );
+                println!("[stream_loop] Updated master_repl_offset: {}", ctx.master_repl_offset);
             }
         }
     }
 
-    println!("[replication_loop] Replication loop ended.");
+    println!("[stream_loop] Exiting command loop.");
     Ok(())
+}
+
+fn is_getack(args: &[String]) -> bool {
+    args.len() == 3
+        && args[0].eq_ignore_ascii_case("REPLCONF")
+        && args[1].eq_ignore_ascii_case("GETACK")
+        && args[2] == "*"
 }

@@ -35,7 +35,6 @@ use crate::commands::transaction::exec::cmd_exec;
 use crate::commands::transaction::multi::cmd_multi;
 use crate::resp::write_resp_error;
 use crate::Context;
-use crate::role::Role;
 
 pub type CmdFn = fn(&[String], &mut Context) -> io::Result<Vec<u8>>;
 
@@ -101,16 +100,9 @@ pub fn dispatch_cmd(
 
     if let Some(cmd_fn) = ALL_CMDS.get(name) {
         println!("[commands::dispatch_cmd] Found handler. Executing...");
-
         let response = cmd_fn(args, ctx)?;
-
-        if ctx.cfg.role == Role::Slave {
-            println!("[commands::dispatch_cmd] Replica mode: response suppressed for '{}'", name);
-        } else {
-            println!("[commands::dispatch_cmd] Sending response ({} bytes)", response.len());
-            out.write_all(&response)?;
-        }
-
+        println!("[commands::dispatch_cmd] Sending response ({} bytes)", response.len());
+        out.write_all(&response)?;
         Ok(())
     } else {
         eprintln!("[commands::dispatch_cmd] Unknown command: '{}'", name);
@@ -123,7 +115,7 @@ pub fn dispatch_cmd(
 /// Silently ignores everything else.
 pub fn replay_cmd(
     name: &str,
-    _out: &mut TcpStream, // no longer used
+    _out: &mut TcpStream, // unused, output is suppressed
     args: &[String],
     ctx: &mut Context,
 ) -> io::Result<()> {
@@ -131,7 +123,7 @@ pub fn replay_cmd(
 
     if let Some(cmd_fn) = WRITE_CMDS.get(name) {
         println!("[commands::replay_cmd] Replaying write command: '{}'", name);
-        let _ = cmd_fn(args, ctx); // execute for side effect only, ignore output
+        let _ = cmd_fn(args, ctx)?; // Ignore the response
     } else {
         println!("[commands::replay_cmd] Ignored non-write command: '{}'", name);
     }
