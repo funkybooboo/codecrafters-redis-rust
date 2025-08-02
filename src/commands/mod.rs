@@ -23,6 +23,7 @@ use crate::commands::list::lrange::cmd_lrange;
 use crate::commands::list::rpush::cmd_rpush;
 use crate::commands::replication::psync::cmd_psync;
 use crate::commands::replication::replconf::cmd_replconf;
+use crate::commands::replication::wait::cmd_wait;
 use crate::commands::stream::xadd::cmd_xadd;
 use crate::commands::stream::xrange::cmd_xrange;
 use crate::commands::stream::xread::cmd_xread;
@@ -65,6 +66,7 @@ lazy_static! {
         m.insert("MULTI".into(),    cmd_multi   as CmdFn);   // start a transaction
         m.insert("EXEC".into(),     cmd_exec    as CmdFn);   // run queued commands (error if no MULTI)
         m.insert("DISCARD".into(),  cmd_discard as CmdFn);   // abort the current transaction and clear all queued commands
+        m.insert("WAIT".into(),     cmd_wait    as CmdFn);   // block until write commands are acknowledged by replicas
         m
     };
 
