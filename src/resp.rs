@@ -172,3 +172,8 @@ pub fn encode_resp_error(msg: &str) -> Vec<u8> {
 pub fn encode_simple_resp_string(s: &str) -> Vec<u8> {
     format!("+{}\r\n", s).into_bytes()
 }
+
+/// Encodes an integer in RESP format: `:<number>\r\n`
+pub fn encode_int(n: i64) -> Vec<u8> {
+    format!(":{}\r\n", n).into_bytes()
+}

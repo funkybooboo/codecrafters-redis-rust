@@ -1,7 +1,12 @@
+use crate::resp::encode_int;
 use std::io;
-use crate::Context;
+use crate::context::Context;
 
-pub fn cmd_wait(_args: &[String], _ctx: &mut Context) -> io::Result<Vec<u8>> {
-    // For now, always respond with 0
-    Ok(b":0\r\n".to_vec())
+pub fn cmd_wait(_args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    let count = {
+        let replicas = ctx.replicas.lock().unwrap();
+        replicas.len()
+    };
+    println!("[WAIT] Responding with connected replica count: {}", count);
+    Ok(encode_int(count as i64))
 }
