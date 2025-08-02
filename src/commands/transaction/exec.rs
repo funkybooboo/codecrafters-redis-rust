@@ -1,41 +1,40 @@
-use std::{
-    io::{self, Write},
-    net::TcpStream,
-};
-use crate::{
-    commands::{Context, dispatch_cmd},
-    resp::write_error,
-};
+use std::io;
+use crate::commands::{Context, ALL_CMDS};
+use crate::resp::{encode_resp_array, encode_resp_error};
 
 /// EXEC → if no MULTI, error; otherwise execute every queued command
-/// (capturing each command’s own error or success reply) and emit them
-/// as an array, then clear the transaction.
-pub fn cmd_exec(
-    out: &mut TcpStream,
-    _args: &[String],
-    ctx: &mut Context,
-) -> io::Result<()> {
-    // 1) If we never saw MULTI, error out
+/// and emit them as a RESP array, then clear the transaction.
+pub fn cmd_exec(_args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_exec] called");
+
     if !ctx.in_transaction {
-        write_error(out, "EXEC without MULTI")?;
-        return Ok(());
+        println!("[cmd_exec] error: EXEC called without MULTI");
+        return Ok(encode_resp_error("EXEC without MULTI"));
     }
 
-    // 2) Take ownership of the queued commands, leaving ctx.queued empty
     let queued = std::mem::take(&mut ctx.queued);
+    println!("[cmd_exec] executing {} queued command(s)", queued.len());
 
-    // 3) Write the array header: one element per queued command
-    write!(out, "*{}\r\n", queued.len())?;
+    let mut responses = Vec::with_capacity(queued.len());
 
-    // 4) Replay each queued command in order.
-    //    dispatch_cmd will write exactly one RESP reply (OK, error, integer, bulk, etc.)
     for (cmd_name, cmd_args) in queued {
-        dispatch_cmd(&cmd_name, out, &cmd_args, ctx)?;
+        println!("[cmd_exec] dispatching command: {} {:?}", cmd_name, cmd_args);
+        if let Some(cmd_fn) = ALL_CMDS.get(&cmd_name.to_uppercase()) {
+            match cmd_fn(&cmd_args, ctx) {
+                Ok(resp) => responses.push(resp),
+                Err(_) => {
+                    println!("[cmd_exec] command '{}' failed", cmd_name);
+                    responses.push(b"-ERR command failed\r\n".to_vec());
+                }
+            }
+        } else {
+            println!("[cmd_exec] unknown command: {}", cmd_name);
+            responses.push(b"-ERR unknown command\r\n".to_vec());
+        }
     }
 
-    // 5) Tear down transaction state
     ctx.in_transaction = false;
-    // ctx.queued is already empty
+    println!("[cmd_exec] transaction complete, state cleared");
 
-    Ok(())
+    Ok(encode_resp_array(&responses))
 }

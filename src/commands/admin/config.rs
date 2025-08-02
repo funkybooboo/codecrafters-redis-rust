@@ -1,27 +1,38 @@
 use crate::commands::Context;
-use crate::resp::{check_len, write_bulk_string, write_error};
+use crate::resp::{encode_bulk_resp_string, encode_resp_array, encode_resp_error};
 use std::io;
-use std::io::Write;
-use std::net::TcpStream;
 
 /// CONFIG GET <dir|dbfilename>
-pub fn cmd_config(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
-    if !check_len(out, args, 3, "usage: CONFIG GET <dir|dbfilename>") {
-        return Ok(());
+pub fn cmd_config(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_config] Received CONFIG command with args: {:?}", args);
+
+    if args.len() != 3 || args[1].to_uppercase() != "GET" {
+        println!("[cmd_config] Incorrect argument length or subcommand");
+        return Ok(encode_resp_error("usage: CONFIG GET <dir|dbfilename>"));
     }
 
     let key = &args[2];
+    println!("[cmd_config] Requested config key: '{}'", key);
+
     let val = match key.as_str() {
-        "dir" => &ctx.cfg.dir,
-        "dbfilename" => &ctx.cfg.dbfilename,
+        "dir" => {
+            println!("[cmd_config] Returning value for 'dir': {}", ctx.cfg.dir);
+            &ctx.cfg.dir
+        }
+        "dbfilename" => {
+            println!("[cmd_config] Returning value for 'dbfilename': {}", ctx.cfg.dbfilename);
+            &ctx.cfg.dbfilename
+        }
         _ => {
-            write_error(out, "unknown config parameter")?;
-            return Ok(());
+            eprintln!("[cmd_config] Unknown config parameter: '{}'", key);
+            return Ok(encode_resp_error("unknown config parameter"));
         }
     };
 
-    // array of two bulk-strings
-    out.write_all("*2\r\n".to_string().as_bytes())?;
-    write_bulk_string(out, key)?;
-    write_bulk_string(out, val)
+    let response = encode_resp_array(&[
+        encode_bulk_resp_string(key),
+        encode_bulk_resp_string(val),
+    ]);
+
+    Ok(response)
 }

@@ -75,6 +75,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "lazy_static",
+ "memchr",
  "thiserror",
  "tokio",
 ]

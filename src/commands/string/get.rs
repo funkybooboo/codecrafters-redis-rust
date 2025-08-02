@@ -1,34 +1,43 @@
 use crate::commands::Context;
 use crate::rdb::Value;
-use crate::resp::{check_len, write_bulk_string, write_error};
+use crate::resp::{encode_bulk_resp_string, encode_resp_error};
 use std::io;
-use std::io::Write;
-use std::net::TcpStream;
 use std::time::SystemTime;
 
 /// GET key -> BulkString or NullBulk
-pub fn cmd_get(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
-    if !check_len(out, args, 2, "usage: GET <key>") {
-        return Ok(());
+pub fn cmd_get(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_get] called with args: {:?}", args);
+
+    if args.len() != 2 {
+        println!("[cmd_get] invalid argument count");
+        return Ok(encode_resp_error("usage: GET <key>"));
     }
 
     let key = &args[1];
+    println!("[cmd_get] looking up key: {}", key);
+
     let mut map = ctx.store.lock().unwrap();
     if let Some((val, opt_expiry)) = map.get(key).cloned() {
         if let Some(exp) = opt_expiry {
             if SystemTime::now() >= exp {
+                println!("[cmd_get] key expired: {}", key);
                 map.remove(key);
-                return out.write_all(b"$-1\r\n");
+                return Ok(b"$-1\r\n".to_vec()); // Null bulk
             }
         }
+
         match val {
-            Value::String(s) => write_bulk_string(out, &s),
-            _ => write_error(
-                out,
-                "WRONGTYPE Operation against a key holding the wrong kind of value",
-            ),
+            Value::String(s) => {
+                println!("[cmd_get] found string value for key: {}", key);
+                Ok(encode_bulk_resp_string(&s))
+            }
+            _ => {
+                println!("[cmd_get] wrong type for key: {}", key);
+                Ok(encode_resp_error("WRONGTYPE Operation against a key holding the wrong kind of value"))
+            }
         }
     } else {
-        out.write_all(b"$-1\r\n")
+        println!("[cmd_get] key not found: {}", key);
+        Ok(b"$-1\r\n".to_vec()) // Null bulk
     }
 }

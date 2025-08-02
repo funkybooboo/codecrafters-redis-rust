@@ -1,41 +1,52 @@
 use crate::commands::Context;
 use crate::rdb::Value;
-use crate::resp::{write_error, write_simple_string};
+use crate::resp::{encode_resp_error, encode_simple_resp_string};
 use std::io;
-use std::net::TcpStream;
 use std::time::{Duration, SystemTime};
 
 /// SET <key> <value> [PX ms] → OK or error
-pub fn cmd_set(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
+pub fn cmd_set(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_set] called with args: {:?}", args);
+
     // validate argument count
     if args.len() != 3 && args.len() != 5 {
-        write_error(out, "usage: SET <key> <val> [PX ms]")?;
-        return Ok(());
+        println!("[cmd_set] invalid number of arguments");
+        return Ok(encode_resp_error("usage: SET <key> <val> [PX ms]"));
     }
 
     let key = &args[1];
     let val = &args[2];
+    println!("[cmd_set] setting key: '{}', value: '{}'", key, val);
+
     let mut map = ctx.store.lock().unwrap();
 
     if args.len() == 3 {
         // simple set without expiry
+        println!("[cmd_set] no expiry provided");
         map.insert(key.clone(), (Value::String(val.clone()), None));
     } else {
-        // parse PX milliseconds
+        // validate optional args: must be "PX" and a number
+        if args[3].to_uppercase() != "PX" {
+            println!("[cmd_set] expected 'PX', found '{}'", args[3]);
+            return Ok(encode_resp_error("expected PX for expiry"));
+        }
+
         let ms = match args[4].parse::<u64>() {
             Ok(n) => n,
             Err(_) => {
-                write_error(out, "PX must be integer")?;
-                return Ok(());
+                println!("[cmd_set] PX argument is not a valid integer: '{}'", args[4]);
+                return Ok(encode_resp_error("PX must be integer"));
             }
         };
-        // compute expiry time
+
         let expiry = SystemTime::now()
             .checked_add(Duration::from_millis(ms))
             .unwrap();
+
+        println!("[cmd_set] setting expiry in {}ms", ms);
         map.insert(key.clone(), (Value::String(val.clone()), Some(expiry)));
     }
 
-    // acknowledge success
-    write_simple_string(out, "OK")
+    println!("[cmd_set] set successful");
+    Ok(encode_simple_resp_string("OK"))
 }

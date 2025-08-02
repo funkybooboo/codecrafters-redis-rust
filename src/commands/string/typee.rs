@@ -1,13 +1,15 @@
 use crate::commands::Context;
 use crate::rdb::Value;
-use crate::resp::{check_len, write_simple_string};
+use crate::resp::{encode_resp_error, encode_simple_resp_string};
 use std::io;
-use std::net::TcpStream;
 use std::time::SystemTime;
 
-pub fn cmd_type(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
-    if !check_len(out, args, 2, "usage: TYPE <key>") {
-        return Ok(());
+pub fn cmd_type(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_type] called with args: {:?}", args);
+
+    if args.len() != 2 {
+        println!("[cmd_type] invalid argument count");
+        return Ok(encode_resp_error("usage: TYPE <key>"));
     }
 
     let key = &args[1];
@@ -17,6 +19,7 @@ pub fn cmd_type(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::
         Some((val, opt_expiry)) => {
             if let Some(exp) = opt_expiry {
                 if SystemTime::now() >= *exp {
+                    println!("[cmd_type] key '{}' is expired", key);
                     "none"
                 } else {
                     match val {
@@ -33,8 +36,11 @@ pub fn cmd_type(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::
                 }
             }
         }
-        None => "none",
+        None => {
+            println!("[cmd_type] key '{}' does not exist", key);
+            "none"
+        }
     };
 
-    write_simple_string(out, response)
+    Ok(encode_simple_resp_string(response))
 }

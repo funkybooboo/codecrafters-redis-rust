@@ -1,44 +1,37 @@
 use crate::commands::Context;
 use crate::rdb::{StreamEntry, Value};
-use crate::resp::{write_bulk_string, write_error};
+use crate::resp::{encode_bulk_resp_string, encode_resp_array, encode_resp_error};
 use std::io;
-use std::io::Write;
-use std::net::TcpStream;
 
-pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
-    // 1) Usage check
+pub fn cmd_xrange(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_xrange] Received XRANGE command: {:?}", args);
+
     if args.len() != 4 {
-        write_error(out, "usage: XRANGE <key> <start> <end>")?;
-        return Ok(());
+        println!("[cmd_xrange] Invalid number of arguments");
+        return Ok(encode_resp_error("usage: XRANGE <key> <start> <end>"));
     }
+
     let key = &args[1];
     let start_raw = &args[2];
     let end_raw = &args[3];
 
-    // 2) Clone entries or early‐return
     let entries: Vec<StreamEntry> = {
         let map = ctx.store.lock().unwrap();
         match map.get(key) {
-            None => {
-                out.write_all(b"*0\r\n")?;
-                return Ok(());
-            }
+            None => return Ok(b"*0\r\n".to_vec()),
             Some((Value::Stream(v), _)) => v.clone(),
             Some(_) => {
-                write_error(
-                    out,
+                return Ok(encode_resp_error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value",
-                )?;
-                return Ok(());
+                ));
             }
         }
     };
 
-    // 3) Parse bounds
     fn parse_start(raw: &str) -> Result<(u64, u64), ()> {
         if raw == "-" {
             Ok((0, 0))
-        } else if raw.find('-').is_some() {
+        } else if raw.contains('-') {
             let mut p = raw.splitn(2, '-');
             let ms = p.next().unwrap().parse().map_err(|_| ())?;
             let seq = p.next().unwrap().parse().map_err(|_| ())?;
@@ -51,27 +44,21 @@ pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io
 
     fn parse_end(raw: &str, entries: &[StreamEntry]) -> Result<(u64, u64), ()> {
         if raw == "+" {
-            // to the end of the stream
             Ok((u64::MAX, u64::MAX))
-        } else if raw.find('-').is_some() {
+        } else if raw.contains('-') {
             let mut p = raw.splitn(2, '-');
             let ms = p.next().unwrap().parse().map_err(|_| ())?;
             let seq = p.next().unwrap().parse().map_err(|_| ())?;
             Ok((ms, seq))
         } else {
             let ms = raw.parse().map_err(|_| ())?;
-            // find max sequence at this ms
             let max_seq = entries
                 .iter()
                 .filter_map(|e| {
                     let mut p = e.id.splitn(2, '-');
-                    let t = p.next().and_then(|s| s.parse::<u64>().ok())?;
-                    let s = p.next().and_then(|s| s.parse::<u64>().ok())?;
-                    if t == ms {
-                        Some(s)
-                    } else {
-                        None
-                    }
+                    let t = p.next()?.parse::<u64>().ok()?;
+                    let s = p.next()?.parse::<u64>().ok()?;
+                    if t == ms { Some(s) } else { None }
                 })
                 .max()
                 .unwrap_or(0);
@@ -81,20 +68,14 @@ pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io
 
     let (start_ms, start_seq) = match parse_start(start_raw) {
         Ok(x) => x,
-        Err(_) => {
-            write_error(out, "ERR invalid start ID format")?;
-            return Ok(());
-        }
-    };
-    let (end_ms, end_seq) = match parse_end(end_raw, &entries) {
-        Ok(x) => x,
-        Err(_) => {
-            write_error(out, "ERR invalid end ID format")?;
-            return Ok(());
-        }
+        Err(_) => return Ok(encode_resp_error("ERR invalid start ID format")),
     };
 
-    // 4) Filter inclusive
+    let (end_ms, end_seq) = match parse_end(end_raw, &entries) {
+        Ok(x) => x,
+        Err(_) => return Ok(encode_resp_error("ERR invalid end ID format")),
+    };
+
     let filtered: Vec<StreamEntry> = entries
         .into_iter()
         .filter(|e| {
@@ -106,19 +87,17 @@ pub fn cmd_xrange(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io
         })
         .collect();
 
-    // 5) Write RESP
-    write!(out, "*{}\r\n", filtered.len())?;
+    let mut outer = Vec::with_capacity(filtered.len());
     for entry in filtered {
-        // [ ID , [k,v,k,v,…] ]
-        write!(out, "*2\r\n")?;
-        write_bulk_string(out, &entry.id)?;
-        let kvs = entry.fields.len() * 2;
-        write!(out, "*{kvs}\r\n")?;
+        let mut inner = vec![encode_bulk_resp_string(&entry.id)];
+        let mut kv_array = Vec::with_capacity(entry.fields.len() * 2);
         for (k, v) in entry.fields {
-            write_bulk_string(out, &k)?;
-            write_bulk_string(out, &v)?;
+            kv_array.push(encode_bulk_resp_string(&k));
+            kv_array.push(encode_bulk_resp_string(&v));
         }
+        inner.push(encode_resp_array(&kv_array));
+        outer.push(encode_resp_array(&inner));
     }
 
-    Ok(())
+    Ok(encode_resp_array(&outer))
 }

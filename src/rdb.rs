@@ -30,40 +30,52 @@ pub(crate) const EMPTY_RDB: &[u8] = b"\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x
 \xfa\x08\x61\x6f\x66\x2d\x62\x61\x73\x65\xc0\x00\xff\xf0\x6e\x3b\xfe\xc0\
 \xff\x5a\xa2";
 
-/// Load *all* key/value pairs and their optional expiry from the RDB file.
 pub fn load_rdb_snapshot<P: AsRef<Path>>(
     path: P,
 ) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
+    println!("[rdb::load_rdb_snapshot] Loading snapshot from {:?}", path.as_ref());
+
     let file = match File::open(&path) {
-        Ok(f) => f,
-        Err(ref e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Ok(f) => {
+            println!("[rdb::load_rdb_snapshot] File opened successfully.");
+            f
+        }
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
+            println!("[rdb::load_rdb_snapshot] Snapshot file not found. Returning empty store.");
+            return Ok(HashMap::new());
+        }
         Err(e) => return Err(e),
     };
+
     let mut rdr = BufReader::new(file);
 
-    // 1) Check header
     if !read_header(&mut rdr)? {
+        println!("[rdb::load_rdb_snapshot] Invalid or missing RDB header.");
         return Ok(HashMap::new());
     }
+    println!("[rdb::load_rdb_snapshot] Header valid. Continuing…");
 
-    // 2) Skip until DB start marker (0xFE)
     skip_metadata(&mut rdr)?;
+    println!("[rdb::load_rdb_snapshot] Metadata skipped.");
 
-    // 3) Drop DB index
     drop_db_index(&mut rdr)?;
+    println!("[rdb::load_rdb_snapshot] DB index dropped.");
 
-    // 4) Skip optional hash‐table sizes
     skip_hash_table_sizes(&mut rdr)?;
+    println!("[rdb::load_rdb_snapshot] Hash table sizes skipped.");
 
-    // 5) Read all entries until EOF marker
-    read_entries(&mut rdr)
+    let entries = read_entries(&mut rdr)?;
+    println!("[rdb::load_rdb_snapshot] Finished reading {} entries.", entries.len());
+
+    Ok(entries)
 }
 
 fn read_header<R: BufRead>(rdr: &mut R) -> io::Result<bool> {
     let mut hdr = [0u8; 9];
     rdr.read_exact(&mut hdr)?;
-    // Must match "REDIS0011"
-    Ok(&hdr == b"REDIS0011")
+    let valid = &hdr == b"REDIS0011";
+    println!("[rdb::read_header] Header check: {}", valid);
+    Ok(valid)
 }
 
 fn skip_metadata<R: BufRead>(rdr: &mut R) -> io::Result<()> {
@@ -74,8 +86,9 @@ fn skip_metadata<R: BufRead>(rdr: &mut R) -> io::Result<()> {
         }
         match byte[0] {
             0xFA => {
-                let _ = read_string(rdr)?;
-                let _ = read_string(rdr)?;
+                let key = read_string(rdr)?;
+                let val = read_string(rdr)?;
+                println!("[rdb::skip_metadata] Skipped metadata: {} = {}", key, val);
             }
             0xFE => break,
             _ => {}
@@ -86,6 +99,7 @@ fn skip_metadata<R: BufRead>(rdr: &mut R) -> io::Result<()> {
 
 fn drop_db_index<R: BufRead>(rdr: &mut R) -> io::Result<()> {
     let _ = read_size(rdr)?;
+    println!("[rdb::drop_db_index] DB index skipped.");
     Ok(())
 }
 
@@ -93,8 +107,9 @@ fn skip_hash_table_sizes<R: BufRead>(rdr: &mut R) -> io::Result<()> {
     let mut marker = [0u8; 1];
     rdr.read_exact(&mut marker)?;
     if marker[0] == 0xFB {
-        let _ = read_size(rdr)?;
-        let _ = read_size(rdr)?;
+        let ht1 = read_size(rdr)?;
+        let ht2 = read_size(rdr)?;
+        println!("[rdb::skip_hash_table_sizes] Skipped hash sizes: {}, {}", ht1, ht2);
     }
     Ok(())
 }
@@ -105,38 +120,40 @@ fn read_entries<R: BufRead>(
     let mut map = HashMap::new();
 
     loop {
-        // 1) Grab the first byte without holding the borrow around
         let prefix = {
             let buf = rdr.fill_buf()?;
             if buf.is_empty() {
+                println!("[rdb::read_entries] EOF reached.");
                 break;
             }
             buf[0]
         };
 
-        // 2) EOF marker?
         if prefix == 0xFF {
             rdr.consume(1);
+            println!("[rdb::read_entries] Found EOF marker.");
             break;
         }
 
-        // 3) Optional expiry prefix (0xFD or 0xFC)
         let expiry = if prefix == 0xFD || prefix == 0xFC {
-            read_expiry_prefix(rdr, prefix)?
+            let exp = read_expiry_prefix(rdr, prefix)?;
+            println!("[rdb::read_entries] Found expiry: {:?}", exp);
+            exp
         } else {
             None
         };
 
-        // 4) Now read the value‐type byte
         let mut t = [0u8; 1];
         rdr.read_exact(&mut t)?;
         if t[0] != 0x00 {
+            println!("[rdb::read_entries] Unsupported type byte: 0x{:X}", t[0]);
             break;
         }
 
-        // 5) Key + Value
         let key = read_string(rdr)?;
         let val = read_string(rdr)?;
+        println!("[rdb::read_entries] Loaded key: '{}' with value: '{}'", key, val);
+
         map.insert(key, (Value::String(val), expiry));
     }
 
@@ -144,24 +161,22 @@ fn read_entries<R: BufRead>(
 }
 
 fn read_expiry_prefix<R: BufRead>(rdr: &mut R, prefix_byte: u8) -> io::Result<Option<SystemTime>> {
+    rdr.consume(1);
     if prefix_byte == 0xFD {
-        rdr.consume(1);
         let mut secs = [0u8; 4];
         rdr.read_exact(&mut secs)?;
-        let secs = u32::from_le_bytes(secs) as u64;
-        Ok(Some(UNIX_EPOCH + Duration::from_secs(secs)))
+        let ts = UNIX_EPOCH + Duration::from_secs(u32::from_le_bytes(secs) as u64);
+        Ok(Some(ts))
     } else if prefix_byte == 0xFC {
-        rdr.consume(1);
         let mut ms = [0u8; 8];
         rdr.read_exact(&mut ms)?;
-        let ms = u64::from_le_bytes(ms);
-        Ok(Some(UNIX_EPOCH + Duration::from_millis(ms)))
+        let ts = UNIX_EPOCH + Duration::from_millis(u64::from_le_bytes(ms));
+        Ok(Some(ts))
     } else {
         Ok(None)
     }
 }
 
-/// Read a size-encoded integer (00, 01, 10 prefix).
 fn read_size<R: BufRead>(rdr: &mut R) -> io::Result<usize> {
     let buf = rdr.fill_buf()?;
     if buf.is_empty() {
@@ -192,37 +207,32 @@ fn read_size<R: BufRead>(rdr: &mut R) -> io::Result<usize> {
             u32::from_be_bytes(arr) as usize
         }
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported size‐encoding tag",
-            ))
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported size‐encoding tag"));
         }
     };
+    println!("[rdb::read_size] Decoded size: {}", len);
     Ok(len)
 }
 
-/// Read either a raw string or an integer‐encoded string (11 prefix).
 fn read_string<R: BufRead>(rdr: &mut R) -> io::Result<String> {
     let buf = rdr.fill_buf()?;
     if buf.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "EOF on string",
-        ));
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF on string"));
     }
+
     let b0 = buf[0];
     let tag = b0 >> 6;
 
-    // Raw string (tags 0..2)
     if tag < 3 {
         let len = read_size(rdr)?;
         let mut data = vec![0u8; len];
         rdr.read_exact(&mut data)?;
-        return String::from_utf8(data)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Bad UTF-8"));
+        let s = String::from_utf8(data)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Bad UTF-8"))?;
+        println!("[rdb::read_string] Decoded raw string: '{}'", s);
+        return Ok(s);
     }
 
-    // Integer‐encoded (tag == 3)
     rdr.consume(1);
     let s = match b0 & 0x3F {
         0 => {
@@ -241,11 +251,9 @@ fn read_string<R: BufRead>(rdr: &mut R) -> io::Result<String> {
             i32::from_le_bytes(x).to_string()
         }
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported integer string encoding",
-            ))
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported integer string encoding"));
         }
     };
+    println!("[rdb::read_string] Decoded integer-encoded string: '{}'", s);
     Ok(s)
 }

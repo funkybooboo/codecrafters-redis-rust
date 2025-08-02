@@ -11,11 +11,11 @@ pub struct ServerConfig {
     pub master_host: String,
     pub master_port: u16,
     pub master_replid: String,
-    pub master_repl_offset: i32,
 }
 
-/// Read `--dir`, `--dbfilename`, `--port`, and `--replicaof` from CLI.
 pub fn parse_config() -> ServerConfig {
+    println!("[config::parse_config] Parsing server configuration...");
+
     let mut dir = ".".to_string();
     let mut dbfilename = "dump.rdb".to_string();
     let mut port: u16 = 6379;
@@ -23,37 +23,52 @@ pub fn parse_config() -> ServerConfig {
     let mut master_host = String::new();
     let mut master_port: u16 = 0;
     let master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string();
-    let master_repl_offset = 0;
 
     let args: Vec<_> = env::args().collect();
+    println!("[config::parse_config] Command-line arguments: {:?}", args);
+
     let mut i = 1;
     while i + 1 < args.len() {
         match args[i].as_str() {
             "--dir" => {
                 dir = args[i + 1].clone();
+                println!("[config::parse_config] --dir set to '{}'", dir);
             }
             "--dbfilename" => {
                 dbfilename = args[i + 1].clone();
+                println!("[config::parse_config] --dbfilename set to '{}'", dbfilename);
             }
             "--port" => {
-                port = args[i + 1].parse().expect("port must be a valid number");
+                port = args[i + 1]
+                    .parse()
+                    .expect("[config::parse_config] Error: port must be a valid number");
+                println!("[config::parse_config] --port set to {}", port);
             }
             "--replicaof" => {
                 let mut parts = args[i + 1].split_whitespace();
-                master_host = parts.next().expect("missing master host").to_string();
+                master_host = parts
+                    .next()
+                    .expect("[config::parse_config] Error: missing master host")
+                    .to_string();
                 master_port = parts
                     .next()
-                    .expect("missing master port")
+                    .expect("[config::parse_config] Error: missing master port")
                     .parse()
-                    .expect("master port must be a number");
+                    .expect("[config::parse_config] Error: master port must be a number");
                 role = Role::Slave;
+                println!(
+                    "[config::parse_config] --replicaof set: master_host='{}', master_port={}, role='{}'",
+                    master_host, master_port, role
+                );
             }
-            _ => {}
+            unknown => {
+                println!("[config::parse_config] Warning: Unknown argument '{}'", unknown);
+            }
         }
         i += 2;
     }
 
-    ServerConfig {
+    let config = ServerConfig {
         dir,
         dbfilename,
         port,
@@ -61,6 +76,8 @@ pub fn parse_config() -> ServerConfig {
         master_host,
         master_port,
         master_replid,
-        master_repl_offset,
-    }
+    };
+
+    println!("[config::parse_config] Final parsed config: {:?}", config);
+    config
 }

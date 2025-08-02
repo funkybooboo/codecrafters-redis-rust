@@ -1,25 +1,30 @@
 use crate::commands::Context;
-use crate::resp::{check_len, write_bulk_string, write_error};
-use std::io::{self, Write};
-use std::net::TcpStream;
+use crate::resp::{encode_bulk_resp_string, encode_resp_array, encode_resp_error};
+use std::io;
 
 /// KEYS "*"
-pub fn cmd_keys(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
-    if !check_len(out, args, 2, "usage: KEYS *") {
-        return Ok(());
+pub fn cmd_keys(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_keys] Received KEYS command with args: {:?}", args);
+
+    if args.len() != 2 {
+        println!("[cmd_keys] Invalid number of arguments.");
+        return Ok(encode_resp_error("usage: KEYS *"));
     }
+
     if args[1] != "*" {
-        write_error(out, "only '*' supported")?;
-        return Ok(());
+        eprintln!("[cmd_keys] Unsupported pattern '{}'. Only '*' is allowed.", args[1]);
+        return Ok(encode_resp_error("only '*' supported"));
     }
 
     let map = ctx.store.lock().unwrap();
     let mut ks: Vec<&String> = map.keys().collect();
     ks.sort();
 
-    write!(out, "*{}\r\n", ks.len())?;
-    for &k in &ks {
-        write_bulk_string(out, k)?;
+    println!("[cmd_keys] Found {} key(s)", ks.len());
+    for k in &ks {
+        println!("[cmd_keys] Key: '{}'", k);
     }
-    Ok(())
+
+    let chunks: Vec<Vec<u8>> = ks.iter().map(|k| encode_bulk_resp_string(k)).collect();
+    Ok(encode_resp_array(&chunks))
 }

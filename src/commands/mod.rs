@@ -7,8 +7,9 @@ mod string;
 mod transaction;
 
 use lazy_static::lazy_static;
-use std::{collections::HashMap, io, net::TcpStream};
-
+use std::{collections::HashMap, io};
+use std::io::Write;
+use std::net::TcpStream;
 use crate::commands::admin::config::cmd_config;
 use crate::commands::admin::info::cmd_info;
 use crate::commands::admin::keys::cmd_keys;
@@ -32,10 +33,11 @@ use crate::commands::string::typee::cmd_type;
 use crate::commands::transaction::discard::cmd_discard;
 use crate::commands::transaction::exec::cmd_exec;
 use crate::commands::transaction::multi::cmd_multi;
-use crate::resp::write_error;
+use crate::resp::write_resp_error;
 use crate::Context;
+use crate::role::Role;
 
-pub type CmdFn = fn(&mut TcpStream, &[String], &mut Context) -> io::Result<()>;
+pub type CmdFn = fn(&[String], &mut Context) -> io::Result<Vec<u8>>;
 
 lazy_static! {
     /// Full map of *all* commands
@@ -79,10 +81,12 @@ lazy_static! {
 
 /// Which commands actually mutate state
 pub fn is_write_cmd(cmd: &str) -> bool {
-    matches!(
+    let result = matches!(
         cmd,
         "SET" | "DEL" | "RPUSH" | "LPUSH" | "LPOP" | "INCR" | "XADD"
-    )
+    );
+    println!("[commands::is_write_cmd] '{}' is write cmd: {}", cmd, result);
+    result
 }
 
 /// Dispatch any command (used by your normal server loop).
@@ -93,10 +97,24 @@ pub fn dispatch_cmd(
     args: &[String],
     ctx: &mut Context,
 ) -> io::Result<()> {
+    println!("[commands::dispatch_cmd] Dispatching command: '{}'", name);
+
     if let Some(cmd_fn) = ALL_CMDS.get(name) {
-        cmd_fn(out, args, ctx)
+        println!("[commands::dispatch_cmd] Found handler. Executing...");
+
+        let response = cmd_fn(args, ctx)?;
+
+        if ctx.cfg.role == Role::Slave {
+            println!("[commands::dispatch_cmd] Replica mode: response suppressed for '{}'", name);
+        } else {
+            println!("[commands::dispatch_cmd] Sending response ({} bytes)", response.len());
+            out.write_all(&response)?;
+        }
+
+        Ok(())
     } else {
-        write_error(out, "unknown command")?;
+        eprintln!("[commands::dispatch_cmd] Unknown command: '{}'", name);
+        write_resp_error(out, "unknown command")?;
         Ok(())
     }
 }
@@ -105,12 +123,18 @@ pub fn dispatch_cmd(
 /// Silently ignores everything else.
 pub fn replay_cmd(
     name: &str,
-    out: &mut TcpStream,
+    _out: &mut TcpStream, // no longer used
     args: &[String],
     ctx: &mut Context,
 ) -> io::Result<()> {
+    println!("[commands::replay_cmd] Attempting to replay command: '{}'", name);
+
     if let Some(cmd_fn) = WRITE_CMDS.get(name) {
-        let _ = cmd_fn(out, args, ctx);
+        println!("[commands::replay_cmd] Replaying write command: '{}'", name);
+        let _ = cmd_fn(args, ctx); // execute for side effect only, ignore output
+    } else {
+        println!("[commands::replay_cmd] Ignored non-write command: '{}'", name);
     }
+
     Ok(())
 }

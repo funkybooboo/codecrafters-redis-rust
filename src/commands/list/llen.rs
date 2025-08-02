@@ -1,31 +1,34 @@
 use crate::commands::Context;
 use crate::rdb::Value;
-use crate::resp::{check_len, write_error};
-use std::io::{self, Write};
-use std::net::TcpStream;
+use crate::resp::encode_resp_error;
+use std::io;
 
-pub fn cmd_llen(out: &mut TcpStream, args: &[String], ctx: &mut Context) -> io::Result<()> {
-    if !check_len(out, args, 2, "usage: LLEN <key>") {
-        return Ok(());
+pub fn cmd_llen(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
+    println!("[cmd_llen] Received LLEN command with args: {:?}", args);
+
+    if args.len() != 2 {
+        println!("[cmd_llen] Invalid number of arguments.");
+        return Ok(encode_resp_error("usage: LLEN <key>"));
     }
 
     let key = &args[1];
     let map = ctx.store.lock().unwrap();
+    println!("[cmd_llen] Checking length of key '{}'", key);
 
-    match map.get(key) {
+    let response = match map.get(key) {
         Some((Value::List(list), _)) => {
-            write!(out, ":{}\r\n", list.len())?;
+            println!("[cmd_llen] List found with {} element(s)", list.len());
+            format!(":{}\r\n", list.len()).into_bytes()
         }
         Some((Value::String(_), _)) | Some((Value::Stream(_), _)) => {
-            write_error(
-                out,
-                "WRONGTYPE Operation against a key holding the wrong kind of value",
-            )?;
+            eprintln!("[cmd_llen] WRONGTYPE: Key '{}' is not a list", key);
+            encode_resp_error("WRONGTYPE Operation against a key holding the wrong kind of value")
         }
         None => {
-            write!(out, ":0\r\n")?;
+            println!("[cmd_llen] Key '{}' not found. Returning 0.", key);
+            b":0\r\n".to_vec()
         }
-    }
+    };
 
-    Ok(())
+    Ok(response)
 }
