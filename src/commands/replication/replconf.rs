@@ -48,7 +48,7 @@ pub fn cmd_replconf(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
             Ok(encode_simple_resp_string("OK"))
         }
         "getack" if value == "*" => {
-            println!("[cmd_replconf] GETACK received — replying with current offset");
+            println!("[cmd_replconf] GETACK received - replying with current offset");
             if let Some(ref mut stream) = ctx.this_client {
                 let ack_value = ctx.master_repl_offset.to_string();
                 write_resp_array(stream, &["REPLCONF", "ACK", &ack_value])?;

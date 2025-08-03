@@ -138,7 +138,7 @@ pub fn peek_resp_command_size<R: BufRead>(reader: &mut R) -> io::Result<usize> {
 
         if buf.len() < current_pos {
             println!(
-                "[resp::peek_resp_command_size] Incomplete command: need {}, got {} — waiting for more data",
+                "[resp::peek_resp_command_size] Incomplete command: need {}, got {} - waiting for more data",
                 current_pos,
                 buf.len()
             );

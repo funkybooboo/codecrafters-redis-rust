@@ -28,7 +28,7 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
         }
         let cmd = args[0].to_uppercase();
 
-        // — Queuing inside MULTI/EXEC —
+        // - Queuing inside MULTI/EXEC -
         if ctx.in_transaction
             && cmd != "MULTI"
             && cmd != "EXEC"
@@ -41,7 +41,7 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             continue;
         }
 
-        // — Master: bump offset & propagate writes —
+        // - Master: bump offset & propagate writes -
         if !ctx.in_transaction
             && ctx.cfg.role == Role::Master
             && is_write_cmd(&cmd)
@@ -70,12 +70,12 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             }
         }
 
-        // — Execute the command locally & reply to client —
+        // - Execute the command locally & reply to client -
         println!("[handle_client] Dispatching '{}' for {:?}", cmd, peer);
         dispatch_cmd(&cmd, &mut writer, &args, &mut ctx)?;
         writer.flush()?;
 
-        // ——— **NEW**: once PSYNC is done, spawn a reader thread for that link and return ———
+        // --- once PSYNC is done, spawn a reader thread for that link and return ---
         if ctx.cfg.role == Role::Master && cmd.eq_ignore_ascii_case("PSYNC") {
             println!("[handle_client] PSYNC complete, handing off replication link");
 

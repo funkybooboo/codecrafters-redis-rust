@@ -57,7 +57,7 @@ fn build_context(cfg: &Arc<ServerConfig>) -> io::Result<Context> {
             snapshot
         }
         Role::Slave => {
-            println!("[init] Replica node — skipping local snapshot load.");
+            println!("[init] Replica node - skipping local snapshot load.");
             HashMap::new()
         }
     };
