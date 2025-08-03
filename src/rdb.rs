@@ -1,12 +1,11 @@
+use crate::context::Context;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::net::TcpStream;
+use std::path::Path;
 use std::sync::Mutex;
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{self, BufRead, BufReader},
-    path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-use std::io::Cursor;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub struct StreamEntry {
@@ -23,7 +22,6 @@ pub enum Value {
 
 pub(crate) type Store = Mutex<HashMap<String, (Value, Option<SystemTime>)>>;
 
-/// The exact 88-byte “empty” RDB file (hex decoded from the codecrafters asset).
 pub(crate) const EMPTY_RDB: &[u8] = b"\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x09\x72\x65\
 \x64\x69\x73\x2d\x76\x65\x72\x05\x37\x2e\x32\x2e\x30\xfa\x0a\x72\x65\x64\
 \x69\x73\x2d\x62\x69\x74\x73\xc0\x40\xfa\x05\x63\x74\x69\x6d\x65\xc2\x6d\
@@ -31,9 +29,34 @@ pub(crate) const EMPTY_RDB: &[u8] = b"\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x
 \xfa\x08\x61\x6f\x66\x2d\x62\x61\x73\x65\xc0\x00\xff\xf0\x6e\x3b\xfe\xc0\
 \xff\x5a\xa2";
 
-pub fn load_rdb_snapshot<P: AsRef<Path>>(
-    path: P,
-) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
+pub fn load_rdb_snapshot_from_stream(reader: &mut BufReader<TcpStream>, ctx: &mut Context) -> io::Result<()> {
+    let mut rdb_header = String::new();
+    reader.read_line(&mut rdb_header)?;
+    println!("[replication::rdb] RDB header: {}", rdb_header.trim());
+
+    if !rdb_header.starts_with('$') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Expected '$' prefix for RDB header, got: '{}'", rdb_header.trim()),
+        ));
+    }
+
+    let rdb_len: usize = rdb_header[1..].trim().parse().map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Invalid RDB length in header")
+    })?;
+
+    let mut rdb_buf = vec![0; rdb_len];
+    reader.read_exact(&mut rdb_buf)?;
+    println!("[replication::rdb] Snapshot read ({} bytes).", rdb_len);
+
+    let parsed = parse_rdb_bytes(&rdb_buf)?;
+    *ctx.store.lock().unwrap() = parsed;
+    println!("[replication::rdb] Snapshot loaded into store successfully.");
+
+    Ok(())
+}
+
+pub fn load_rdb_snapshot_from_path<P: AsRef<Path>>(path: P) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
     println!("[rdb::load_rdb_snapshot] Loading snapshot from {:?}", path.as_ref());
 
     let file = match File::open(&path) {
@@ -54,6 +77,7 @@ pub fn load_rdb_snapshot<P: AsRef<Path>>(
         println!("[rdb::load_rdb_snapshot] Invalid or missing RDB header.");
         return Ok(HashMap::new());
     }
+
     println!("[rdb::load_rdb_snapshot] Header valid. Continuing…");
 
     skip_metadata(&mut rdr)?;
@@ -71,9 +95,7 @@ pub fn load_rdb_snapshot<P: AsRef<Path>>(
     Ok(entries)
 }
 
-/// Parses an RDB snapshot from in-memory bytes.
-/// Returns a HashMap<String, (Value, Option<SystemTime>)> containing the key-value pairs.
-pub fn parse_rdb_bytes(bytes: &[u8]) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
+fn parse_rdb_bytes(bytes: &[u8]) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
     let cursor = Cursor::new(bytes);
     let mut rdr = BufReader::new(cursor);
 
@@ -81,7 +103,6 @@ pub fn parse_rdb_bytes(bytes: &[u8]) -> io::Result<HashMap<String, (Value, Optio
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RDB header"));
     }
 
-    // Skip auxiliary metadata entries
     loop {
         let byte = rdr.fill_buf()?;
         if byte.is_empty() {
@@ -100,8 +121,7 @@ pub fn parse_rdb_bytes(bytes: &[u8]) -> io::Result<HashMap<String, (Value, Optio
                 drop_db_index(&mut rdr)?;
             }
             0xFB | 0xFC => {
-                rdr.consume(1); // skip expiry type prefix
-                // skip later
+                rdr.consume(1);
             }
             0xFF => {
                 println!("[rdb::parse] Reached EOF marker during metadata.");
@@ -114,8 +134,7 @@ pub fn parse_rdb_bytes(bytes: &[u8]) -> io::Result<HashMap<String, (Value, Optio
 
     skip_hash_table_sizes(&mut rdr)?;
 
-    let peek = rdr.fill_buf()?;
-    if peek.first() == Some(&0xFF) {
+    if rdr.fill_buf()?.first() == Some(&0xFF) {
         println!("[rdb::parse] No key-value entries. EOF immediately after metadata.");
         rdr.consume(1);
         return Ok(HashMap::new());
@@ -127,9 +146,7 @@ pub fn parse_rdb_bytes(bytes: &[u8]) -> io::Result<HashMap<String, (Value, Optio
 fn read_header<R: BufRead>(rdr: &mut R) -> io::Result<bool> {
     let mut hdr = [0u8; 9];
     rdr.read_exact(&mut hdr)?;
-    let valid = &hdr == b"REDIS0011";
-    println!("[rdb::read_header] Header check: {}", valid);
-    Ok(valid)
+    Ok(&hdr == b"REDIS0011")
 }
 
 fn skip_metadata<R: BufRead>(rdr: &mut R) -> io::Result<()> {
@@ -153,40 +170,33 @@ fn skip_metadata<R: BufRead>(rdr: &mut R) -> io::Result<()> {
 
 fn drop_db_index<R: BufRead>(rdr: &mut R) -> io::Result<()> {
     let _ = read_size(rdr)?;
-    println!("[rdb::drop_db_index] DB index skipped.");
     Ok(())
 }
 
 fn skip_hash_table_sizes<R: BufRead>(rdr: &mut R) -> io::Result<()> {
     let buf = rdr.fill_buf()?;
     if buf.is_empty() {
-        println!("[rdb::skip_hash_table_sizes] EOF reached.");
         return Ok(());
     }
 
     if buf[0] == 0xFB {
         rdr.consume(1);
-        let ht1 = read_size(rdr)?;
-        let ht2 = read_size(rdr)?;
-        println!("[rdb::skip_hash_table_sizes] Skipped hash sizes: {}, {}", ht1, ht2);
+        let _ = read_size(rdr)?;
+        let _ = read_size(rdr)?;
     } else {
-        println!("[rdb::skip_hash_table_sizes] Unexpected marker: 0x{:X}", buf[0]);
-        rdr.consume(1); // consume unexpected marker
+        rdr.consume(1); // consume unknown marker
     }
 
     Ok(())
 }
 
-fn read_entries<R: BufRead>(
-    rdr: &mut R,
-) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
+fn read_entries<R: BufRead>(rdr: &mut R) -> io::Result<HashMap<String, (Value, Option<SystemTime>)>> {
     let mut map = HashMap::new();
 
     loop {
         let prefix = {
             let buf = rdr.fill_buf()?;
             if buf.is_empty() {
-                println!("[rdb::read_entries] EOF reached.");
                 break;
             }
             buf[0]
@@ -194,14 +204,11 @@ fn read_entries<R: BufRead>(
 
         if prefix == 0xFF {
             rdr.consume(1);
-            println!("[rdb::read_entries] Reached end of RDB.");
             break;
         }
 
         let expiry = match prefix {
-            0xFD | 0xFC => {
-                read_expiry_prefix(rdr, prefix)?
-            }
+            0xFD | 0xFC => read_expiry_prefix(rdr, prefix)?,
             _ => None,
         };
 
@@ -211,13 +218,9 @@ fn read_entries<R: BufRead>(
             0x00 => {
                 let key = read_string(rdr)?;
                 let val = read_string(rdr)?;
-                println!("[rdb::read_entries] Loaded key: '{}' with value: '{}'", key, val);
                 map.insert(key, (Value::String(val), expiry));
             }
-            0xFF => {
-                println!("[rdb::read_entries] Unexpected EOF marker after expiry.");
-                break;
-            }
+            0xFF => break,
             other => {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unsupported type byte: 0x{:X}", other)));
             }
@@ -227,20 +230,20 @@ fn read_entries<R: BufRead>(
     Ok(map)
 }
 
-fn read_expiry_prefix<R: BufRead>(rdr: &mut R, prefix_byte: u8) -> io::Result<Option<SystemTime>> {
+fn read_expiry_prefix<R: BufRead>(rdr: &mut R, prefix: u8) -> io::Result<Option<SystemTime>> {
     rdr.consume(1);
-    if prefix_byte == 0xFD {
-        let mut secs = [0u8; 4];
-        rdr.read_exact(&mut secs)?;
-        let ts = UNIX_EPOCH + Duration::from_secs(u32::from_le_bytes(secs) as u64);
-        Ok(Some(ts))
-    } else if prefix_byte == 0xFC {
-        let mut ms = [0u8; 8];
-        rdr.read_exact(&mut ms)?;
-        let ts = UNIX_EPOCH + Duration::from_millis(u64::from_le_bytes(ms));
-        Ok(Some(ts))
-    } else {
-        Ok(None)
+    match prefix {
+        0xFD => {
+            let mut secs = [0u8; 4];
+            rdr.read_exact(&mut secs)?;
+            Ok(Some(UNIX_EPOCH + Duration::from_secs(u32::from_le_bytes(secs) as u64)))
+        }
+        0xFC => {
+            let mut ms = [0u8; 8];
+            rdr.read_exact(&mut ms)?;
+            Ok(Some(UNIX_EPOCH + Duration::from_millis(u64::from_le_bytes(ms))))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -249,8 +252,10 @@ fn read_size<R: BufRead>(rdr: &mut R) -> io::Result<usize> {
     if buf.is_empty() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF on size"));
     }
+
     let b0 = buf[0];
     let tag = b0 >> 6;
+
     match tag {
         0 => {
             rdr.consume(1);
@@ -273,11 +278,7 @@ fn read_size<R: BufRead>(rdr: &mut R) -> io::Result<usize> {
             rdr.consume(5);
             Ok(u32::from_be_bytes(arr) as usize)
         }
-        3 => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Size-prefixed value cannot use integer-encoded string tag",
-        )),
-        _ => unreachable!(), // logically unreachable due to 2-bit tag
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid size tag")),
     }
 }
 
@@ -289,63 +290,37 @@ fn read_string<R: BufRead>(rdr: &mut R) -> io::Result<String> {
 
     let b0 = buf[0];
     let tag = b0 >> 6;
-    println!(
-        "[rdb::read_string] First byte: 0x{:X}, tag: {}, raw: {:?}",
-        b0,
-        tag,
-        &buf[..buf.len().min(8)] // preview up to 8 bytes for context
-    );
 
     if tag == 3 {
+        rdr.consume(1);
         let subtype = b0 & 0x3F;
-        println!("[rdb::read_string] Detected integer-encoded string, subtype: 0x{:X}", subtype);
-        rdr.consume(1); // consume the type tag byte
 
-        let s = match subtype {
+        let val = match subtype {
             0 => {
                 let mut x = [0u8; 1];
                 rdr.read_exact(&mut x)?;
-                let val = (x[0] as i8).to_string();
-                println!("[rdb::read_string] Decoded 8-bit int: {}", val);
-                val
+                (x[0] as i8).to_string()
             }
             1 => {
                 let mut x = [0u8; 2];
                 rdr.read_exact(&mut x)?;
-                let val = i16::from_le_bytes(x).to_string();
-                println!("[rdb::read_string] Decoded 16-bit int: {}", val);
-                val
+                i16::from_le_bytes(x).to_string()
             }
             2 => {
                 let mut x = [0u8; 4];
                 rdr.read_exact(&mut x)?;
-                let val = i32::from_le_bytes(x).to_string();
-                println!("[rdb::read_string] Decoded 32-bit int: {}", val);
-                val
+                i32::from_le_bytes(x).to_string()
             }
             _ => {
-                println!(
-                    "[rdb::read_string] Unsupported integer-encoded string subtype: 0x{:X}",
-                    subtype
-                );
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Unsupported integer string encoding: 0x{:X}", subtype),
-                ));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unsupported integer string encoding: 0x{:X}", subtype)));
             }
         };
 
-        println!("[rdb::read_string] Decoded integer-encoded string: '{}'", s);
-        Ok(s)
+        Ok(val)
     } else {
-        println!("[rdb::read_string] Detected raw string, parsing size...");
         let len = read_size(rdr)?;
-        println!("[rdb::read_string] Raw string length: {}", len);
         let mut data = vec![0u8; len];
         rdr.read_exact(&mut data)?;
-        let s = String::from_utf8(data)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Bad UTF-8"))?;
-        println!("[rdb::read_string] Decoded raw string: '{}'", s);
-        Ok(s)
+        String::from_utf8(data).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Bad UTF-8"))
     }
 }

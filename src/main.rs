@@ -2,102 +2,120 @@ extern crate core;
 
 mod commands;
 mod config;
+mod context;
 mod rdb;
 mod replication;
 mod resp;
 mod role;
 mod server;
-mod context;
 
 use crate::{
     config::{parse_config, ServerConfig},
-    rdb::load_rdb_snapshot,
+    context::{BlockingList, Context},
+    rdb::load_rdb_snapshot_from_path,
+    replication::connect_and_sync_master,
     role::Role,
-    server::handle_client,
+    server::serve_client_connection,
 };
-use std::collections::HashMap;
+
 use std::{
+    collections::HashMap,
     io,
-    net::TcpListener,
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    thread,
 };
-use crate::context::{BlockingList, Context};
+use crate::context::Replicas;
+use crate::rdb::Store;
 
 fn main() -> io::Result<()> {
     println!("[main] Starting Redis-like server...");
 
-    let cfg: ServerConfig = parse_config();
-    let cfg = Arc::new(cfg);
+    let cfg = Arc::new(parse_config());
     println!("[main] Configuration parsed: {:?}", cfg);
 
-    // Load snapshot only if master
+    let shared_ctx = build_context(&cfg)?;
+    println!("[main] Context initialized.");
+
+    if cfg.role == Role::Slave {
+        spawn_replica_sync_thread(shared_ctx.clone());
+    }
+
+    start_tcp_server(cfg.port, shared_ctx)?;
+
+    println!("[main] Shutting down server cleanly.");
+    Ok(())
+}
+
+fn build_context(cfg: &Arc<ServerConfig>) -> io::Result<Context> {
     let store_data = match cfg.role {
         Role::Master => {
             let snapshot_path = format!("{}/{}", cfg.dir, cfg.dbfilename);
-            println!("[main] Loading RDB snapshot from {}", snapshot_path);
-            let raw_snapshot = load_rdb_snapshot(snapshot_path)?;
-            println!("[main] Snapshot loaded successfully.");
-            raw_snapshot
+            println!("[init] Loading RDB snapshot from {}", snapshot_path);
+            let snapshot = load_rdb_snapshot_from_path(snapshot_path)?;
+            println!("[init] Snapshot loaded successfully.");
+            snapshot
         }
         Role::Slave => {
-            println!("[main] Replica node — skipping local snapshot load.");
+            println!("[init] Replica node — skipping local snapshot load.");
             HashMap::new()
         }
     };
 
-    let store = Arc::new(Mutex::new(store_data));
-    let replicas = Arc::new(Mutex::new(Vec::new()));
+    let store: Arc<Store> = Arc::new(Mutex::new(store_data));
+    let replicas: Replicas = Arc::new(Mutex::new(HashMap::<SocketAddr, (TcpStream, usize)>::new()));
     let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
 
-    let base_ctx = Context {
+    Ok(Context {
         cfg: cfg.clone(),
-        store: store.clone(),
-        replicas: replicas.clone(),
-        blocking: blocking_clients.clone(),
+        store,
+        replicas,
+        blocking: blocking_clients,
         master_repl_offset: 0,
+        pending_writes: Arc::new(Mutex::new(Vec::new())),
         in_transaction: false,
         queued: Vec::new(),
         this_client: None,
-    };
+    })
+}
 
-    println!("[main] Context initialized.");
+fn spawn_replica_sync_thread(ctx: Context) {
+    println!("[main] Node is a replica. Spawning replication thread...");
+    let ctx_clone = ctx.clone();
+    thread::spawn(move || {
+        println!("[replication_thread] Starting replication handler...");
+        if let Err(e) = connect_and_sync_master(ctx_clone) {
+            eprintln!("[replication_thread] Replication error: {}", e);
+        }
+        println!("[replication_thread] Replication thread exited.");
+    });
+}
 
-    if cfg.role == Role::Slave {
-        println!("[main] Node is a replica. Spawning replication thread...");
-        let ctx_clone = base_ctx.clone();
-        std::thread::spawn(move || {
-            println!("[replication_thread] Starting replication handler...");
-            if let Err(e) = replication::handle_replication(ctx_clone) {
-                eprintln!("[replication_thread] Replication error: {}", e);
-            }
-            println!("[replication_thread] Replication thread exited.");
-        });
-    }
-
-    let bind_addr = format!("127.0.0.1:{}", cfg.port);
+fn start_tcp_server(port: u16, ctx: Context) -> io::Result<()> {
+    let bind_addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&bind_addr)?;
-    println!("[main] Listening for clients on {}...", bind_addr);
+    println!("[net] Listening for clients on {}...", bind_addr);
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                println!(
-                    "[main] Accepted new client connection from {:?}. Spawning handler thread...",
-                    stream.peer_addr().unwrap_or_else(|_| "[unknown]".parse().unwrap())
-                );
-                let ctx_clone = base_ctx.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, ctx_clone) {
-                        eprintln!("[handle_client] Client error: {}", e);
+                let peer = stream
+                    .peer_addr()
+                    .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+                println!("[net] Accepted client from {:?}", peer);
+
+                let ctx_clone = ctx.clone();
+                thread::spawn(move || {
+                    if let Err(e) = serve_client_connection(stream, ctx_clone) {
+                        eprintln!("[client] Error: {}", e);
                     }
                 });
             }
             Err(e) => {
-                eprintln!("[main] Failed to accept connection on {}: {}", bind_addr, e);
+                eprintln!("[net] Failed to accept connection: {}", e);
             }
         }
     }
 
-    println!("[main] Shutting down server cleanly.");
     Ok(())
 }

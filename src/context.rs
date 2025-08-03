@@ -6,15 +6,18 @@ use crate::rdb::Store;
 
 pub type BlockingList = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
 
+pub type Replicas = Arc<Mutex<HashMap<std::net::SocketAddr, (TcpStream, usize)>>>;
+
 /// Holds *both* the global server state (all Arcs)
 /// and the per‐connection transaction state (plain fields).
 pub struct Context {
     // global:
     pub cfg:       Arc<ServerConfig>,
     pub store:     Arc<Store>,
-    pub replicas:  Arc<Mutex<Vec<TcpStream>>>,
+    pub replicas: Replicas,
     pub blocking:  BlockingList,
     pub master_repl_offset: usize,
+    pub pending_writes: Arc<Mutex<Vec<Vec<String>>>>,
 
     // per‐connection:
     pub in_transaction: bool,                       // tracks MULTI…EXEC
@@ -35,6 +38,7 @@ impl Clone for Context {
             replicas: self.replicas.clone(),
             blocking: self.blocking.clone(),
             master_repl_offset: self.master_repl_offset,
+            pending_writes: self.pending_writes.clone(),
             in_transaction: self.in_transaction,
             queued: self.queued.clone(),
             this_client: self.this_client.as_ref().and_then(|s| {

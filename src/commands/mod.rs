@@ -10,6 +10,7 @@ use lazy_static::lazy_static;
 use std::{collections::HashMap, io};
 use std::io::Write;
 use std::net::TcpStream;
+
 use crate::commands::admin::config::cmd_config;
 use crate::commands::admin::info::cmd_info;
 use crate::commands::admin::keys::cmd_keys;
@@ -34,8 +35,10 @@ use crate::commands::string::typee::cmd_type;
 use crate::commands::transaction::discard::cmd_discard;
 use crate::commands::transaction::exec::cmd_exec;
 use crate::commands::transaction::multi::cmd_multi;
+
 use crate::resp::write_resp_error;
 use crate::Context;
+use crate::role::Role;
 
 pub type CmdFn = fn(&[String], &mut Context) -> io::Result<Vec<u8>>;
 
@@ -43,30 +46,30 @@ lazy_static! {
     /// Full map of *all* commands
     static ref ALL_CMDS: HashMap<String, CmdFn> = {
         let mut m = HashMap::new();
-        m.insert("PING".into(),     cmd_ping    as CmdFn);   // always reply with “PONG”
-        m.insert("ECHO".into(),     cmd_echo    as CmdFn);   // send back whatever text you give
-        m.insert("SET".into(),      cmd_set     as CmdFn);   // set a key to a value (with optional expiry)
-        m.insert("GET".into(),      cmd_get     as CmdFn);   // retrieve the value stored at a key
-        m.insert("CONFIG".into(),   cmd_config  as CmdFn);   // fetch a server configuration setting
-        m.insert("KEYS".into(),     cmd_keys    as CmdFn);   // list all keys matching a pattern
-        m.insert("INFO".into(),     cmd_info    as CmdFn);   // return server info (e.g. replication status)
-        m.insert("REPLCONF".into(), cmd_replconf as CmdFn);  // accept replication options from a replica
-        m.insert("PSYNC".into(),    cmd_psync   as CmdFn);   // perform partial resynchronization for replicas
-        m.insert("RPUSH".into(),    cmd_rpush   as CmdFn);   // append one or more elements to the end of a list
-        m.insert("LRANGE".into(),   cmd_lrange  as CmdFn);   // get a subrange of elements from a list
-        m.insert("LPUSH".into(),    cmd_lpush   as CmdFn);   // prepend one or more elements to a list
-        m.insert("LLEN".into(),     cmd_llen    as CmdFn);   // return the number of elements in a list
-        m.insert("LPOP".into(),     cmd_lpop    as CmdFn);   // remove and return element(s) from the front of a list
-        m.insert("BLPOP".into(),    cmd_blpop   as CmdFn);   // block until an element is available, then pop it
-        m.insert("TYPE".into(),     cmd_type    as CmdFn);   // report the data type stored at a key
-        m.insert("XADD".into(),     cmd_xadd    as CmdFn);   // append a new entry to a stream
-        m.insert("XRANGE".into(),   cmd_xrange  as CmdFn);   // read a range of entries from a stream
-        m.insert("XREAD".into(),    cmd_xread   as CmdFn);   // read from one or more streams (optionally blocking)
-        m.insert("INCR".into(),     cmd_incr    as CmdFn);   // increment the integer value of a key by one
-        m.insert("MULTI".into(),    cmd_multi   as CmdFn);   // start a transaction
-        m.insert("EXEC".into(),     cmd_exec    as CmdFn);   // run queued commands (error if no MULTI)
-        m.insert("DISCARD".into(),  cmd_discard as CmdFn);   // abort the current transaction and clear all queued commands
-        m.insert("WAIT".into(),     cmd_wait    as CmdFn);   // block until write commands are acknowledged by replicas
+        m.insert("PING".into(),     cmd_ping    as CmdFn);
+        m.insert("ECHO".into(),     cmd_echo    as CmdFn);
+        m.insert("SET".into(),      cmd_set     as CmdFn);
+        m.insert("GET".into(),      cmd_get     as CmdFn);
+        m.insert("CONFIG".into(),   cmd_config  as CmdFn);
+        m.insert("KEYS".into(),     cmd_keys    as CmdFn);
+        m.insert("INFO".into(),     cmd_info    as CmdFn);
+        m.insert("REPLCONF".into(), cmd_replconf as CmdFn);
+        m.insert("PSYNC".into(),    cmd_psync   as CmdFn);
+        m.insert("RPUSH".into(),    cmd_rpush   as CmdFn);
+        m.insert("LRANGE".into(),   cmd_lrange  as CmdFn);
+        m.insert("LPUSH".into(),    cmd_lpush   as CmdFn);
+        m.insert("LLEN".into(),     cmd_llen    as CmdFn);
+        m.insert("LPOP".into(),     cmd_lpop    as CmdFn);
+        m.insert("BLPOP".into(),    cmd_blpop   as CmdFn);
+        m.insert("TYPE".into(),     cmd_type    as CmdFn);
+        m.insert("XADD".into(),     cmd_xadd    as CmdFn);
+        m.insert("XRANGE".into(),   cmd_xrange  as CmdFn);
+        m.insert("XREAD".into(),    cmd_xread   as CmdFn);
+        m.insert("INCR".into(),     cmd_incr    as CmdFn);
+        m.insert("MULTI".into(),    cmd_multi   as CmdFn);
+        m.insert("EXEC".into(),     cmd_exec    as CmdFn);
+        m.insert("DISCARD".into(),  cmd_discard as CmdFn);
+        m.insert("WAIT".into(),     cmd_wait    as CmdFn);
         m
     };
 
@@ -80,55 +83,71 @@ lazy_static! {
     };
 }
 
-/// Which commands actually mutate state
 pub fn is_write_cmd(cmd: &str) -> bool {
-    let result = matches!(
-        cmd,
+    matches!(
+        cmd.to_ascii_uppercase().as_str(),
         "SET" | "DEL" | "RPUSH" | "LPUSH" | "LPOP" | "INCR" | "XADD"
-    );
-    println!("[commands::is_write_cmd] '{}' is write cmd: {}", cmd, result);
-    result
+    )
 }
 
-/// Dispatch any command (used by your normal server loop).
-/// Emits “unknown command” on unrecognized names.
+/// Should a normal client get a reply?
+fn should_respond(cmd: &str, ctx: &Context) -> bool {
+    match ctx.cfg.role {
+        Role::Master => true,
+        Role::Slave  => !cmd.eq_ignore_ascii_case("REPLCONF"),
+    }
+}
+
+/// Dispatches a command for either a client or the replication link.
+/// - **Clients**: replies per `should_respond`.
+/// - **Replication link** (the socket back to the master): only emits `REPLCONF` responses
+///   (so you don’t echo `+PONG` for `PING`, etc.).
 pub fn dispatch_cmd(
     name: &str,
     out: &mut TcpStream,
     args: &[String],
     ctx: &mut Context,
 ) -> io::Result<()> {
-    println!("[commands::dispatch_cmd] Dispatching command: '{}'", name);
+    println!("[dispatch_cmd] Dispatching command: '{}'", name);
+
+    // Are we in replica mode, and is this socket the replication link back to the master?
+    let is_repl_link = if ctx.cfg.role == Role::Slave {
+        out.peer_addr()
+            .map(|peer| peer.port() == ctx.cfg.master_port)
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     if let Some(cmd_fn) = ALL_CMDS.get(name) {
-        println!("[commands::dispatch_cmd] Found handler. Executing...");
+        // Execute for side‐effects (store update, offsets, etc.)
         let response = cmd_fn(args, ctx)?;
-        println!("[commands::dispatch_cmd] Sending response ({} bytes)", response.len());
-        out.write_all(&response)?;
+
+        if is_repl_link {
+            // Swallow everything except REPLCONF
+            if name.eq_ignore_ascii_case("REPLCONF") {
+                println!("[dispatch_cmd] (repl link) sending REPLCONF reply");
+                out.write_all(&response)?;
+            } else {
+                println!("[dispatch_cmd] (repl link) swallowing reply to '{}'", name);
+            }
+        } else {
+            // Regular client: follow should_respond
+            if should_respond(name, ctx) {
+                println!("[dispatch_cmd] (client) sending reply to '{}'", name);
+                out.write_all(&response)?;
+            } else {
+                println!("[dispatch_cmd] (client) skipping reply to '{}'", name);
+            }
+        }
+
         Ok(())
     } else {
-        eprintln!("[commands::dispatch_cmd] Unknown command: '{}'", name);
-        write_resp_error(out, "unknown command")?;
+        eprintln!("[dispatch_cmd] Unknown command: '{}'", name);
+        // Only error out to real clients
+        if !is_repl_link {
+            write_resp_error(out, "unknown command")?;
+        }
         Ok(())
     }
-}
-
-/// Replay only write‐type commands (used by replication).
-/// Silently ignores everything else.
-pub fn replay_cmd(
-    name: &str,
-    _out: &mut TcpStream, // unused, output is suppressed
-    args: &[String],
-    ctx: &mut Context,
-) -> io::Result<()> {
-    println!("[commands::replay_cmd] Attempting to replay command: '{}'", name);
-
-    if let Some(cmd_fn) = WRITE_CMDS.get(name) {
-        println!("[commands::replay_cmd] Replaying write command: '{}'", name);
-        let _ = cmd_fn(args, ctx)?; // Ignore the response
-    } else {
-        println!("[commands::replay_cmd] Ignored non-write command: '{}'", name);
-    }
-
-    Ok(())
 }
