@@ -63,33 +63,41 @@ fn main() -> io::Result<()> {
     println!("[main] Context initialized.");
 
     if cfg.role == Role::Slave {
-        println!("[main] Node is a replica. Starting replication thread...");
+        println!("[main] Node is a replica. Spawning replication thread...");
         let ctx_clone = base_ctx.clone();
         std::thread::spawn(move || {
+            println!("[replication_thread] Starting replication handler...");
             if let Err(e) = replication::handle_replication(ctx_clone) {
-                eprintln!("[replication_loop] replication error: {e}");
+                eprintln!("[replication_thread] Replication error: {}", e);
             }
+            println!("[replication_thread] Replication thread exited.");
         });
     }
 
     let bind_addr = format!("127.0.0.1:{}", cfg.port);
     let listener = TcpListener::bind(&bind_addr)?;
-    println!("[main] Listening on {}...", bind_addr);
+    println!("[main] Listening for clients on {}...", bind_addr);
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                println!("[main] Accepted new client connection from {:?}", stream.peer_addr());
+                println!(
+                    "[main] Accepted new client connection from {:?}. Spawning handler thread...",
+                    stream.peer_addr().unwrap_or_else(|_| "[unknown]".parse().unwrap())
+                );
                 let ctx_clone = base_ctx.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = handle_client(stream, ctx_clone) {
-                        eprintln!("[handle_client] Client error: {e}");
+                        eprintln!("[handle_client] Client error: {}", e);
                     }
                 });
             }
-            Err(e) => eprintln!("[main] Connection failed: {e}"),
+            Err(e) => {
+                eprintln!("[main] Failed to accept connection on {}: {}", bind_addr, e);
+            }
         }
     }
 
+    println!("[main] Shutting down server cleanly.");
     Ok(())
 }

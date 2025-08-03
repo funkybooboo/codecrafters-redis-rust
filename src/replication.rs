@@ -75,25 +75,26 @@ fn send_and_expect(
 fn load_rdb_snapshot(reader: &mut BufReader<TcpStream>, ctx: &mut Context) -> io::Result<()> {
     let mut rdb_header = String::new();
     reader.read_line(&mut rdb_header)?;
-    println!("[rdb_load] RDB header: {}", rdb_header.trim());
+    println!("[replication::rdb_load] RDB header: {}", rdb_header.trim());
 
     if !rdb_header.starts_with('$') {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected RDB length header"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Expected '$' prefix for RDB header, got: '{}'", rdb_header.trim()),
+        ));
     }
 
-    let rdb_len: usize = rdb_header[1..].trim().parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid RDB length"))?;
+    let rdb_len: usize = rdb_header[1..].trim().parse().map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Invalid RDB length in header")
+    })?;
 
     let mut rdb_buf = vec![0; rdb_len];
     reader.read_exact(&mut rdb_buf)?;
-    println!("[rdb_load] Snapshot read, size: {}", rdb_len);
-    
+    println!("[replication::rdb_load] Snapshot read ({} bytes).", rdb_len);
+
     let parsed = crate::rdb::parse_rdb_bytes(&rdb_buf)?;
     *ctx.store.lock().unwrap() = parsed;
-    println!("[rdb_load] Snapshot loaded into store.");
-
-    let peek_buf = reader.fill_buf()?;
-    println!("[rdb_load] Peek after RDB: {:?}", String::from_utf8_lossy(peek_buf));
+    println!("[replication::rdb_load] Snapshot loaded into store successfully.");
 
     Ok(())
 }

@@ -3,10 +3,17 @@ use std::io;
 use crate::context::Context;
 
 pub fn cmd_wait(_args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
-    let count = {
-        let replicas = ctx.replicas.lock().unwrap();
-        replicas.len()
+    let count = match ctx.replicas.lock() {
+        Ok(replicas) => {
+            let count = replicas.len();
+            println!("[cmd_wait] Connected replica count: {}", count);
+            count
+        }
+        Err(e) => {
+            eprintln!("[cmd_wait] Failed to acquire lock on replicas: {}", e);
+            0
+        }
     };
-    println!("[WAIT] Responding with connected replica count: {}", count);
+
     Ok(encode_int(count as i64))
 }

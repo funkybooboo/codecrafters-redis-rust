@@ -24,6 +24,11 @@ pub struct Context {
 
 impl Clone for Context {
     fn clone(&self) -> Self {
+        println!("[Context::clone] Cloning Context (repl_offset={}, tx_mode={}, queued_cmds={})",
+                 self.master_repl_offset,
+                 self.in_transaction,
+                 self.queued.len(),
+        );
         Self {
             cfg: self.cfg.clone(),
             store: self.store.clone(),
@@ -32,7 +37,13 @@ impl Clone for Context {
             master_repl_offset: self.master_repl_offset,
             in_transaction: self.in_transaction,
             queued: self.queued.clone(),
-            this_client: self.this_client.as_ref().and_then(|s| s.try_clone().ok()),
+            this_client: self.this_client.as_ref().and_then(|s| {
+                let cloned = s.try_clone();
+                if cloned.is_err() {
+                    eprintln!("[Context::clone] Failed to clone TcpStream for this_client.");
+                }
+                cloned.ok()
+            }),
         }
     }
 }
