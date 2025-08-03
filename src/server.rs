@@ -15,10 +15,7 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
         .unwrap_or_else(|_| "[unknown]".parse().unwrap());
     println!("[handle_client] New client connected: {:?}", peer);
 
-    // So things like PUBLISH can reach back to this client
     ctx.this_client = Some(stream.try_clone()?);
-
-    // We keep two clones of the socket here: one for reading, one for writing.
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -28,21 +25,20 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
         }
         let cmd = args[0].to_uppercase();
 
-        // --- Subscribed-mode guard ---
-        // Once the client has subscribed to at least one channel, only these are allowed:
-        //   SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PING, QUIT
+        // --- Subscribed‐mode guard + special PING ---
         if !ctx.subscribed_channels.is_empty() {
+            // PING in subscribed mode returns ["pong", ""]
+            if cmd == "PING" {
+                write_resp_array(&mut writer, &["pong", ""])?;
+                writer.flush()?;
+                continue;
+            }
+            // otherwise only these are allowed
             let allowed = matches!(
                 cmd.as_str(),
-                "SUBSCRIBE"
-                    | "UNSUBSCRIBE"
-                    | "PSUBSCRIBE"
-                    | "PUNSUBSCRIBE"
-                    | "PING"
-                    | "QUIT"
+                "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "QUIT"
             );
             if !allowed {
-                // don't include the leading "ERR " — write_resp_error will add it for us
                 let msg = format!("Can't execute '{}' in subscribed mode", cmd.to_lowercase());
                 write_resp_error(&mut writer, &msg)?;
                 writer.flush()?;
@@ -50,7 +46,7 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             }
         }
 
-        // - Queuing inside MULTI/EXEC -
+        // — Queuing inside MULTI/EXEC —
         if ctx.in_transaction
             && cmd != "MULTI"
             && cmd != "EXEC"
@@ -63,19 +59,17 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             continue;
         }
 
-        // - Master: bump offset & propagate writes -
+        // — Master: bump offset & propagate writes —
         if !ctx.in_transaction
             && ctx.cfg.role == Role::Master
             && is_write_cmd(&cmd)
         {
-            // 1) bump
             ctx.master_repl_offset += 1;
             println!(
                 "[handle_client] master_repl_offset now {} after '{}'",
                 ctx.master_repl_offset, cmd
             );
 
-            // 2) propagate the raw RESP array to each replica
             let items: Vec<&str> = args.iter().map(String::as_str).collect();
             let mut reps = ctx.replicas.lock().unwrap();
             let mut to_remove = Vec::new();
@@ -92,23 +86,21 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             }
         }
 
-        // - Execute the command locally & reply to client -
+        // — Execute locally & reply to client —
         println!("[handle_client] Dispatching '{}' for {:?}", cmd, peer);
         dispatch_cmd(&cmd, &mut writer, &args, &mut ctx)?;
         writer.flush()?;
 
-        // --- once PSYNC is done, spawn a reader thread for that link and return ---
+        // — on PSYNC, hand off replication link —
         if ctx.cfg.role == Role::Master && cmd.eq_ignore_ascii_case("PSYNC") {
             println!("[handle_client] PSYNC complete, handing off replication link");
 
-            // `reader` is a BufReader<TcpStream>; pull out the inner TcpStream
             let repl_stream = reader.into_inner();
             let ctx_for_reader = ctx.clone();
 
             thread::spawn(move || {
                 let mut buf = BufReader::new(repl_stream);
                 while let Ok(Some(args)) = read_resp_array(&mut buf) {
-                    // look for: REPLCONF ACK <offset>
                     if args.len() == 3
                         && args[0].eq_ignore_ascii_case("REPLCONF")
                         && args[1].eq_ignore_ascii_case("ACK")
