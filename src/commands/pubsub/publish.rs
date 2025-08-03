@@ -1,21 +1,33 @@
+use crate::Context;
+use crate::resp::{encode_int, write_resp_array};
 use std::io;
-use crate::context::Context;
-use crate::resp::{encode_int, encode_resp_error};
+use std::io::Write;
 
 /// PUBLISH <channel> <message>
-/// Returns: integer number of clients that are currently subscribed to channel
+/// Reply: (integer) number of subscribers the message was delivered to
 pub fn cmd_publish(args: &[String], ctx: &mut Context) -> io::Result<Vec<u8>> {
     if args.len() != 3 {
-        return Ok(encode_resp_error(
-            "ERR wrong number of arguments for 'publish' command",
-        ));
+        // wrong number of args: return a RESP error
+        return Ok(b"-ERR wrong number of arguments for 'publish'\r\n".to_vec());
     }
     let channel = &args[1];
-    // let message = &args[2]; // we'll deliver this later
+    let message = &args[2];
 
-    // Count how many subscribers are registered for this channel
-    let registry = ctx.pubsub.lock().unwrap();
-    let n = registry.get(channel).map_or(0, |subs| subs.len());
+    // Take the lock once
+    let mut registry = ctx.pubsub.lock().unwrap();
+    let subs = registry.get(channel).map(|v| v.len()).unwrap_or(0);
 
-    Ok(encode_int(n as i64))
+    // Deliver the message to each subscriber
+    if let Some(subscribers) = registry.get_mut(channel) {
+        for subscriber in subscribers.iter_mut() {
+            // ["message", channel, message]
+            let _ = write_resp_array(
+                subscriber,
+                &["message", channel.as_str(), message.as_str()],
+            ).and_then(|_| subscriber.flush());
+        }
+    }
+
+    // Reply with the number of clients we delivered to
+    Ok(encode_int(subs as i64))
 }
