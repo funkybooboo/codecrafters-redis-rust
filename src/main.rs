@@ -26,7 +26,7 @@ use std::{
     thread,
 };
 use std::collections::HashSet;
-use crate::context::{PubSub, Replicas};
+use crate::context::{Replicas};
 use crate::rdb::Store;
 
 fn main() -> io::Result<()> {
@@ -66,7 +66,6 @@ fn build_context(cfg: &Arc<ServerConfig>) -> io::Result<Context> {
     let store: Arc<Store> = Arc::new(Mutex::new(store_data));
     let replicas: Replicas = Arc::new(Mutex::new(HashMap::<SocketAddr, (TcpStream, usize)>::new()));
     let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
-    let pubsub: PubSub = Arc::new(Mutex::new(HashMap::new()));
 
     Ok(Context {
         cfg: cfg.clone(),

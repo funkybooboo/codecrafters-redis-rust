@@ -8,8 +8,6 @@ pub type BlockingList = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
 
 pub type Replicas = Arc<Mutex<HashMap<std::net::SocketAddr, (TcpStream, usize)>>>;
 
-pub type PubSub = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
-
 /// Holds *both* the global server state (all Arcs)
 /// and the per‐connection transaction state (plain fields).
 pub struct Context {
