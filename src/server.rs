@@ -6,6 +6,7 @@ use crate::Context;
 use std::{
     io::{self, BufReader, Write},
     net::TcpStream,
+    thread,
 };
 
 pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Result<()> {
@@ -14,9 +15,10 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
         .unwrap_or_else(|_| "[unknown]".parse().unwrap());
     println!("[handle_client] New client connected: {:?}", peer);
 
-    // so dispatch_cmd can reply directly if it needs to
+    // So things like PUBLISH can reach back to this client
     ctx.this_client = Some(stream.try_clone()?);
 
+    // We keep two clones of the socket here: one for reading, one for writing.
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -25,12 +27,8 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             continue;
         }
         let cmd = args[0].to_uppercase();
-        println!(
-            "[handle_client] Received '{}' from {:?} args={:?}",
-            cmd, peer, &args[1..]
-        );
 
-        // ——— inside MULTI/EXEC we just QUEUE ———
+        // — Queuing inside MULTI/EXEC —
         if ctx.in_transaction
             && cmd != "MULTI"
             && cmd != "EXEC"
@@ -43,18 +41,19 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             continue;
         }
 
-        // ——— MASTER, non‐transactional, write commands ———
+        // — Master: bump offset & propagate writes —
         if !ctx.in_transaction
             && ctx.cfg.role == Role::Master
             && is_write_cmd(&cmd)
         {
-            // 1) bump the replication offset
+            // 1) bump
             ctx.master_repl_offset += 1;
             println!(
                 "[handle_client] master_repl_offset now {} after '{}'",
                 ctx.master_repl_offset, cmd
             );
-            // 2) propagate the raw RESP array to all replicas
+
+            // 2) propagate the raw RESP array to each replica
             let items: Vec<&str> = args.iter().map(String::as_str).collect();
             let mut reps = ctx.replicas.lock().unwrap();
             let mut to_remove = Vec::new();
@@ -71,13 +70,51 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             }
         }
 
-        // ——— execute locally & reply to the client ———
-        println!(
-            "[handle_client] Dispatching '{}' for {:?}",
-            cmd, peer
-        );
+        // — Execute the command locally & reply to client —
+        println!("[handle_client] Dispatching '{}' for {:?}", cmd, peer);
         dispatch_cmd(&cmd, &mut writer, &args, &mut ctx)?;
         writer.flush()?;
+
+        // ——— **NEW**: once PSYNC is done, spawn a reader thread for that link and return ———
+        if ctx.cfg.role == Role::Master && cmd.eq_ignore_ascii_case("PSYNC") {
+            println!("[handle_client] PSYNC complete, handing off replication link");
+
+            // `reader` is a BufReader<TcpStream>; pull out the inner TcpStream
+            let repl_stream = reader.into_inner();
+            // clone the Context so our new thread can update the same `ctx.replicas`
+            let ctx_for_reader = ctx.clone();
+
+            thread::spawn(move || {
+                let mut buf = BufReader::new(repl_stream);
+                // keep reading the replica’s RESP frames
+                while let Ok(Some(args)) = read_resp_array(&mut buf) {
+                    // look for: REPLCONF ACK <offset>
+                    if args.len() == 3
+                        && args[0].eq_ignore_ascii_case("REPLCONF")
+                        && args[1].eq_ignore_ascii_case("ACK")
+                    {
+                        if let Ok(peer_addr) = buf.get_ref().peer_addr() {
+                            if let Ok(offset) = args[2].parse::<usize>() {
+                                let mut reps = ctx_for_reader.replicas.lock().unwrap();
+                                if let Some((_, last_ack)) = reps.get_mut(&peer_addr) {
+                                    *last_ack = offset;
+                                    println!(
+                                        "[replication_reader] {} ACKed offset {}",
+                                        peer_addr, offset
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("[replication_reader] replication link closed");
+            });
+
+            // return, dropping the `writer` clone here; the only live handles
+            // to that socket are now the one in `ctx.replicas` (for writes)
+            // and the one in our new reader thread.
+            return Ok(());
+        }
     }
 
     println!("[handle_client] Client {:?} disconnected.", peer);
