@@ -5,6 +5,7 @@ mod replication;
 mod stream;
 mod string;
 mod transaction;
+mod pubsub;
 
 use lazy_static::lazy_static;
 use std::{collections::HashMap, io};
@@ -22,6 +23,7 @@ use crate::commands::list::lpop::cmd_lpop;
 use crate::commands::list::lpush::cmd_lpush;
 use crate::commands::list::lrange::cmd_lrange;
 use crate::commands::list::rpush::cmd_rpush;
+use crate::commands::pubsub::subscribe::cmd_subscribe;
 use crate::commands::replication::psync::cmd_psync;
 use crate::commands::replication::replconf::cmd_replconf;
 use crate::commands::replication::wait::cmd_wait;
@@ -70,6 +72,7 @@ lazy_static! {
         m.insert("EXEC".into(),     cmd_exec    as CmdFn);
         m.insert("DISCARD".into(),  cmd_discard as CmdFn);
         m.insert("WAIT".into(),     cmd_wait    as CmdFn);
+        m.insert("SUBSCRIBE".into(), cmd_subscribe as CmdFn);
         m
     };
 

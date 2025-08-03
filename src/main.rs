@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use crate::context::Replicas;
+use crate::context::{PubSub, Replicas};
 use crate::rdb::Store;
 
 fn main() -> io::Result<()> {
@@ -65,12 +65,14 @@ fn build_context(cfg: &Arc<ServerConfig>) -> io::Result<Context> {
     let store: Arc<Store> = Arc::new(Mutex::new(store_data));
     let replicas: Replicas = Arc::new(Mutex::new(HashMap::<SocketAddr, (TcpStream, usize)>::new()));
     let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
+    let pubsub: PubSub = Arc::new(Mutex::new(HashMap::new()));
 
     Ok(Context {
         cfg: cfg.clone(),
         store,
         replicas,
         blocking: blocking_clients,
+        sub_handlers: pubsub,
         master_repl_offset: 0,
         pending_writes: Arc::new(Mutex::new(Vec::new())),
         in_transaction: false,

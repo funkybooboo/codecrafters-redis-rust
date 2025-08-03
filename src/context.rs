@@ -8,6 +8,8 @@ pub type BlockingList = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
 
 pub type Replicas = Arc<Mutex<HashMap<std::net::SocketAddr, (TcpStream, usize)>>>;
 
+pub type PubSub = Arc<Mutex<HashMap<String, Vec<TcpStream>>>>;
+
 /// Holds *both* the global server state (all Arcs)
 /// and the per‐connection transaction state (plain fields).
 pub struct Context {
@@ -16,6 +18,7 @@ pub struct Context {
     pub store:     Arc<Store>,
     pub replicas: Replicas,
     pub blocking:  BlockingList,
+    pub sub_handlers: PubSub,
     pub master_repl_offset: usize,
     pub pending_writes: Arc<Mutex<Vec<Vec<String>>>>,
 
@@ -37,6 +40,7 @@ impl Clone for Context {
             store: self.store.clone(),
             replicas: self.replicas.clone(),
             blocking: self.blocking.clone(),
+            sub_handlers: self.sub_handlers.clone(),
             master_repl_offset: self.master_repl_offset,
             pending_writes: self.pending_writes.clone(),
             in_transaction: self.in_transaction,
