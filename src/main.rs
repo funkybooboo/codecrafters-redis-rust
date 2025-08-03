@@ -25,6 +25,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
+use std::collections::HashSet;
 use crate::context::{PubSub, Replicas};
 use crate::rdb::Store;
 
@@ -72,12 +73,13 @@ fn build_context(cfg: &Arc<ServerConfig>) -> io::Result<Context> {
         store,
         replicas,
         blocking: blocking_clients,
-        sub_handlers: pubsub,
         master_repl_offset: 0,
         pending_writes: Arc::new(Mutex::new(Vec::new())),
         in_transaction: false,
         queued: Vec::new(),
         this_client: None,
+        pubsub: Arc::new(Mutex::new(HashMap::new())),
+        subscribed_channels: HashSet::new(),
     })
 }
 

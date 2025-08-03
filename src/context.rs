@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use crate::config::ServerConfig;
@@ -18,7 +18,6 @@ pub struct Context {
     pub store:     Arc<Store>,
     pub replicas: Replicas,
     pub blocking:  BlockingList,
-    pub sub_handlers: PubSub,
     pub master_repl_offset: usize,
     pub pending_writes: Arc<Mutex<Vec<Vec<String>>>>,
 
@@ -26,6 +25,9 @@ pub struct Context {
     pub in_transaction: bool,                       // tracks MULTI…EXEC
     pub queued: Vec<(String, Vec<String>)>,         // buffers (cmd, args)
     pub this_client: Option<TcpStream>,
+
+    pub pubsub: Arc<Mutex<HashMap<String, Vec<TcpStream>>>>,
+    pub subscribed_channels: HashSet<String>,
 }
 
 impl Clone for Context {
@@ -40,7 +42,6 @@ impl Clone for Context {
             store: self.store.clone(),
             replicas: self.replicas.clone(),
             blocking: self.blocking.clone(),
-            sub_handlers: self.sub_handlers.clone(),
             master_repl_offset: self.master_repl_offset,
             pending_writes: self.pending_writes.clone(),
             in_transaction: self.in_transaction,
@@ -52,6 +53,8 @@ impl Clone for Context {
                 }
                 cloned.ok()
             }),
+            pubsub: self.pubsub.clone(),
+            subscribed_channels: self.subscribed_channels.clone(),
         }
     }
 }
