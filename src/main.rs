@@ -18,6 +18,8 @@ use crate::{
     server::serve_client_connection,
 };
 
+use crate::context::Replicas;
+use crate::rdb::Store;
 use std::{
     collections::HashMap,
     io,
@@ -26,8 +28,6 @@ use std::{
     thread,
 };
 use std::collections::HashSet;
-use crate::context::{Replicas};
-use crate::rdb::Store;
 
 fn main() -> io::Result<()> {
     println!("[main] Starting Redis-like server...");
@@ -65,19 +65,22 @@ fn build_context(cfg: &Arc<ServerConfig>) -> io::Result<Context> {
 
     let store: Arc<Store> = Arc::new(Mutex::new(store_data));
     let replicas: Replicas = Arc::new(Mutex::new(HashMap::<SocketAddr, (TcpStream, usize)>::new()));
-    let blocking_clients: BlockingList = Arc::new(Mutex::new(HashMap::new()));
+    let blocking: BlockingList = Arc::new(Mutex::new(HashMap::new()));
+
+    let pubsub: Arc<Mutex<HashMap<String, Vec<TcpStream>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     Ok(Context {
         cfg: cfg.clone(),
         store,
         replicas,
-        blocking: blocking_clients,
+        blocking,
         master_repl_offset: 0,
         pending_writes: Arc::new(Mutex::new(Vec::new())),
+        pubsub,
         in_transaction: false,
         queued: Vec::new(),
         this_client: None,
-        pubsub: Arc::new(Mutex::new(HashMap::new())),
         subscribed_channels: HashSet::new(),
     })
 }

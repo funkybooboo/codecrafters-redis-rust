@@ -39,6 +39,7 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
                 "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "QUIT"
             );
             if !allowed {
+                // don't prefix with "ERR " here—write_resp_error will do that
                 let msg = format!("Can't execute '{}' in subscribed mode", cmd.to_lowercase());
                 write_resp_error(&mut writer, &msg)?;
                 writer.flush()?;

@@ -5,6 +5,7 @@ mod replication;
 mod stream;
 mod string;
 mod transaction;
+mod pubsub;
 
 use lazy_static::lazy_static;
 use std::{collections::HashMap, io};
@@ -16,13 +17,14 @@ use crate::commands::admin::info::cmd_info;
 use crate::commands::admin::keys::cmd_keys;
 use crate::commands::connection::echo::cmd_echo;
 use crate::commands::connection::ping::cmd_ping;
-use crate::commands::connection::subscribe::cmd_subscribe;
 use crate::commands::list::blpop::cmd_blpop;
 use crate::commands::list::llen::cmd_llen;
 use crate::commands::list::lpop::cmd_lpop;
 use crate::commands::list::lpush::cmd_lpush;
 use crate::commands::list::lrange::cmd_lrange;
 use crate::commands::list::rpush::cmd_rpush;
+use crate::commands::pubsub::publish::cmd_publish;
+use crate::commands::pubsub::subscribe::cmd_subscribe;
 use crate::commands::replication::psync::cmd_psync;
 use crate::commands::replication::replconf::cmd_replconf;
 use crate::commands::replication::wait::cmd_wait;
@@ -72,6 +74,7 @@ lazy_static! {
         m.insert("DISCARD".into(),  cmd_discard as CmdFn);
         m.insert("WAIT".into(),     cmd_wait    as CmdFn);
         m.insert("SUBSCRIBE".into(), cmd_subscribe as CmdFn);
+        m.insert("PUBLISH".into(), cmd_publish as CmdFn);
         m
     };
 
