@@ -1,5 +1,5 @@
 use crate::commands::{dispatch_cmd, is_write_cmd};
-use crate::resp::{read_resp_array, write_resp_array, write_simple_resp_string};
+use crate::resp::{read_resp_array, write_resp_array, write_simple_resp_string, write_resp_error};
 use crate::role::Role;
 use crate::Context;
 
@@ -27,6 +27,28 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
             continue;
         }
         let cmd = args[0].to_uppercase();
+
+        // --- Subscribed-mode guard ---
+        // Once the client has subscribed to at least one channel, only these are allowed:
+        //   SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PING, QUIT
+        if !ctx.subscribed_channels.is_empty() {
+            let allowed = matches!(
+                cmd.as_str(),
+                "SUBSCRIBE"
+                    | "UNSUBSCRIBE"
+                    | "PSUBSCRIBE"
+                    | "PUNSUBSCRIBE"
+                    | "PING"
+                    | "QUIT"
+            );
+            if !allowed {
+                // don't include the leading "ERR " — write_resp_error will add it for us
+                let msg = format!("Can't execute '{}' in subscribed mode", cmd.to_lowercase());
+                write_resp_error(&mut writer, &msg)?;
+                writer.flush()?;
+                continue;
+            }
+        }
 
         // - Queuing inside MULTI/EXEC -
         if ctx.in_transaction
@@ -81,12 +103,10 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
 
             // `reader` is a BufReader<TcpStream>; pull out the inner TcpStream
             let repl_stream = reader.into_inner();
-            // clone the Context so our new thread can update the same `ctx.replicas`
             let ctx_for_reader = ctx.clone();
 
             thread::spawn(move || {
                 let mut buf = BufReader::new(repl_stream);
-                // keep reading the replica’s RESP frames
                 while let Ok(Some(args)) = read_resp_array(&mut buf) {
                     // look for: REPLCONF ACK <offset>
                     if args.len() == 3
@@ -110,9 +130,6 @@ pub fn serve_client_connection(stream: TcpStream, mut ctx: Context) -> io::Resul
                 println!("[replication_reader] replication link closed");
             });
 
-            // return, dropping the `writer` clone here; the only live handles
-            // to that socket are now the one in `ctx.replicas` (for writes)
-            // and the one in our new reader thread.
             return Ok(());
         }
     }
