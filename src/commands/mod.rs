@@ -25,6 +25,7 @@ use crate::commands::list::lrange::cmd_lrange;
 use crate::commands::list::rpush::cmd_rpush;
 use crate::commands::pubsub::publish::cmd_publish;
 use crate::commands::pubsub::subscribe::cmd_subscribe;
+use crate::commands::pubsub::unsubscribe::cmd_unsubscribe;
 use crate::commands::replication::psync::cmd_psync;
 use crate::commands::replication::replconf::cmd_replconf;
 use crate::commands::replication::wait::cmd_wait;
@@ -75,6 +76,7 @@ lazy_static! {
         m.insert("WAIT".into(),     cmd_wait    as CmdFn);
         m.insert("SUBSCRIBE".into(), cmd_subscribe as CmdFn);
         m.insert("PUBLISH".into(), cmd_publish as CmdFn);
+        m.insert("UNSUBSCRIBE".into(), cmd_unsubscribe as CmdFn);
         m
     };
 
